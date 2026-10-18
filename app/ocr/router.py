@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from PIL import Image
+from sqlalchemy import select
 
 from .. import storage
 from ..config import settings
@@ -76,7 +77,9 @@ def run_page(page_id: int) -> None:
             return
         doc = s.get(Document, page.doc_id)
         ds = dict(doc.settings or {})
-        layout, _src = resolve(doc.layouts, page.index, page.override)
+        overrides = [(i, o) for i, o in s.execute(
+            select(Page.index, Page.override).where(Page.doc_id == page.doc_id, Page.index <= page.index))]
+        layout, _src = resolve(doc.layouts, page.index, page.override, overrides)
         index, forced, has_text = page.index, page.forced_engine, page.has_text_layer
         src = source_for_page(doc, index)
         doc_id = doc.id
