@@ -1,8 +1,12 @@
-// Tab I — Layout & crop: one box for all pages, odd/even boxes, per-page overrides, footnote boxes, columns.
+// Tab I — Layout & crop.
+// Two modes:
+//  • Page by page (default): editing always gives the current page its own crop; pages without one
+//    carry forward the nearest earlier page's crop (same rule the server uses at OCR time).
+//  • Same for all pages: one all-pages layout (optionally odd/even), with per-page exceptions.
 import { api, h, toast } from "./common.js";
 
 let ctx, root;
-let scope = "global";   // global | odd | even | page
+let scope = "page";     // global | odd | even | page   (page-by-page mode always uses "page")
 let tool = "main";      // main | notes
 let zoom = 1;           // multiplier on fit-to-view
 let working = null;     // the layout being edited for the current scope
@@ -47,6 +51,7 @@ function maybeBuild() {
 
 function build() {
   built = true;
+  scope = perPage() ? "page" : "global";
   placeholder.remove();
   rail = h("div.rail");
   pageInput = h("input", { type: "text" });
@@ -67,7 +72,7 @@ function build() {
       "Page", pageInput, pageTotal,
       h("button.icon.sm", { onclick: () => ctx.goto(ctx.current + 1), title: "Next page (→)" }, "▶")),
     h("div", { style: { flex: 1 } }),
-    h("span.hint", "Drag to draw · drag a box to move · handles resize · Shift-drag redraws"),
+    h("span.hint", "Drag to draw · drag a box to move · handles resize · Shift-drag redraws · ← → pages"),
     zoomBtns);
   side = h("div.sidepanel");
   root.append(rail, h("div.stagewrap", bar, stage), side);
@@ -79,25 +84,52 @@ function build() {
 
 function setZoom(z) { zoom = Math.max(0.4, Math.min(5, z)); layoutSheet(); }
 
-// ------------------------------------------------------------------ layout resolution (mirrors server)
-function resolveFor(p) {
-  if (p.override) return { layout: p.override, source: "page" };
+// ------------------------------------------------------------------ layout resolution (mirrors app/layout.py)
+const perPage = () => ctx.doc.layouts.carry_forward !== false;
+
+function baseFor(index) {
   const L = ctx.doc.layouts;
   if (L.use_odd_even) {
-    const k = (p.index + 1) % 2 === 1 ? "odd" : "even";
-    if (L[k]) return { layout: L[k], source: k };
+    const k = (index + 1) % 2 === 1 ? "odd" : "even";
+    if (L[k]) return { layout: L[k], source: k, from: 0 };
   }
-  return { layout: L.global, source: "global" };
+  return { layout: L.global, source: "global", from: 0 };
+}
+
+function resolveFor(p) {
+  if (p.override) return { layout: p.override, source: "page", from: p.number };
+  const L = ctx.doc.layouts;
+  if (perPage()) {
+    for (let i = p.index - 1; i >= 0; i--) {
+      const q = ctx.pages[i];
+      if (L.use_odd_even && q.index % 2 !== p.index % 2) continue;
+      if (q.override) return { layout: q.override, source: "inherited", from: q.number };
+    }
+  }
+  return baseFor(p.index);
+}
+
+// All pages in one pass (for the thumbnail outlines).
+function resolveAll() {
+  const L = ctx.doc.layouts;
+  const last = { any: null, 0: null, 1: null };
+  return ctx.pages.map((p) => {
+    if (p.override) { last.any = last[p.index % 2] = p.override; return p.override; }
+    const prev = perPage() ? (L.use_odd_even ? last[p.index % 2] : last.any) : null;
+    return prev || baseFor(p.index).layout;
+  });
 }
 
 function autoParity() {
-  if (scope === "odd" || scope === "even") scope = (ctx.current + 1) % 2 === 1 ? "odd" : "even";
+  if (perPage()) scope = "page";
+  else if (scope === "odd" || scope === "even") scope = (ctx.current + 1) % 2 === 1 ? "odd" : "even";
 }
 
 function loadWorking() {
   const L = ctx.doc.layouts;
   const p = ctx.page;
   if (!p) return;
+  if (perPage()) scope = "page";
   if (scope === "global") working = clone(L.global) || defLayout();
   else if (scope === "odd" || scope === "even") working = clone(L[scope] || L.global) || defLayout();
   else working = clone(p.override || resolveFor(p).layout) || defLayout();
@@ -117,7 +149,6 @@ function save() {
       if (sc === "page") {
         const res = await api(`/api/pages/${page.id}`, { method: "PATCH", body: { override: snapshot } });
         Object.assign(page, res);
-        renderRail();
       } else {
         const body = { layouts: { [sc]: snapshot } };
         if (sc !== "global") body.layouts.use_odd_even = true;
@@ -126,6 +157,8 @@ function save() {
       renderSide();
     } catch (e) { toast(e.message, "error"); }
   }, 250);
+  // Optimistic: the next page should inherit this crop even before the save round-trips.
+  if (sc === "page") { page.override = snapshot; renderRail(); }
 }
 
 // ------------------------------------------------------------------ rendering
@@ -149,17 +182,25 @@ function scrollRail() {
   if (t) t.scrollIntoView({ block: "nearest" });
 }
 
+const thumbCache = new Map(); // page id -> <img>, so re-rendering the rail never re-requests thumbnails
+
 function renderRail() {
+  const eff = resolveAll();
+  const keepScroll = rail.scrollTop;
   const frag = ctx.pages.map((p, i) => {
     const badges = [];
-    if (p.override) badges.push(h("span.badge.blue", { title: "Has its own layout" }, "OWN"));
+    if (p.override) badges.push(h("span.badge.blue", { title: "Has its own crop" }, "OWN"));
     if (p.skip) badges.push(h("span.badge.red", "SKIP"));
     if (p.has_text_layer) badges.push(h("span.badge", { title: "PDF text layer present" }, "TXT"));
+    let im = thumbCache.get(p.id);
+    if (!im) { im = h("img", { src: `/api/pages/${p.id}/thumb`, loading: "lazy", alt: "" }); thumbCache.set(p.id, im); }
+    const m = eff[i]?.main;
+    const crop = m ? h("div.crop", { style: { left: pct(m.x), top: pct(m.y), width: pct(m.w), height: pct(m.h) } }) : null;
     return h(`div.t${i === ctx.current ? ".on" : ""}${p.skip ? ".skip" : ""}`, { onclick: () => ctx.goto(i) },
-      h("img", { src: `/api/pages/${p.id}/thumb`, loading: "lazy", alt: "" }),
-      h("div.bd", badges), h("div.no", p.number));
+      h("div.tw", im, crop), h("div.bd", badges), h("div.no", p.number));
   });
   rail.replaceChildren(...frag);
+  rail.scrollTop = keepScroll;
 }
 
 function layoutSheet() {
@@ -276,7 +317,17 @@ function renderSide() {
   const L = ctx.doc.layouts;
   const parity = (p.index + 1) % 2 === 1 ? "odd" : "even";
   const res = resolveFor(p);
-  const srcName = { global: "the all-pages layout", odd: "the odd-page layout", even: "the even-page layout", page: "its own layout" }[res.source];
+  const pp = perPage();
+  const srcName = { global: "the all-pages layout", odd: "the odd-page layout", even: "the even-page layout", page: "its own layout",
+    inherited: `page ${res.from}'s crop` }[res.source];
+
+  const modeSeg = seg([["page", "Page by page", "Each page keeps its own crop; new pages start from the last one you set"],
+    ["all", "Same for all pages", "One crop for every page (odd/even optional)"]], pp ? "page" : "all", async (v) => {
+    if ((v === "page") === pp) return;
+    await ctx.patchDoc({ layouts: { carry_forward: v === "page" } });
+    scope = v === "page" ? "page" : "global";
+    loadWorking(); renderRail(); renderAll();
+  });
 
   const scopeOpts = [["global", "All pages", "Edit the layout every page uses by default"]];
   if (L.use_odd_even) scopeOpts.push([parity, parity === "odd" ? "Odd pages" : "Even pages", `Edit the layout for ${parity} pages`]);
@@ -285,6 +336,7 @@ function renderSide() {
   const oddEven = h("input", { type: "checkbox", checked: L.use_odd_even });
   oddEven.onchange = async () => {
     const body = { layouts: { use_odd_even: oddEven.checked } };
+    if (pp) { await ctx.patchDoc(body); loadWorking(); renderRail(); renderAll(); return; }
     if (oddEven.checked) {
       if (!L.odd) body.layouts.odd = clone(L.global);
       if (!L.even) body.layouts.even = clone(L.global);
@@ -294,10 +346,21 @@ function renderSide() {
     loadWorking(); renderAll();
   };
 
-  const notice = h(`div.source-note${res.source === "page" ? ".override" : ""}`,
-    "This page uses ", h("b", srcName), ".",
-    res.source === "page" && scope !== "page" ? h("div", { style: { marginTop: "6px" } }, "Changes to other layouts won't affect it until you clear its own layout.") : null,
-    res.source === "page" ? h("div", { style: { marginTop: "8px" } }, h("button.sm", { onclick: clearOverride }, "Clear page layout")) : null);
+  let notice;
+  if (pp) {
+    const msg = res.source === "page"
+      ? ["Page ", p.number, " has ", h("b", "its own crop"), ". Later pages without their own crop follow it."]
+      : res.source === "inherited"
+        ? ["Page ", p.number, " is using ", h("b", srcName), ". Adjust the box to give this page its own — or just move on with ", h("kbd", "→"), "."]
+        : ["No earlier page has a crop yet. Draw one here and the pages after it will start from it."];
+    notice = h(`div.source-note${res.source === "page" ? ".override" : ""}`, ...msg,
+      res.source === "page" && p.index > 0 ? h("div", { style: { marginTop: "8px" } }, h("button.sm", { onclick: clearOverride }, "Reset to previous page's crop")) : null);
+  } else {
+    notice = h(`div.source-note${res.source === "page" ? ".override" : ""}`,
+      "This page uses ", h("b", srcName), ".",
+      res.source === "page" && scope !== "page" ? h("div", { style: { marginTop: "6px" } }, "Changes to other layouts won't affect it until you clear its own layout.") : null,
+      res.source === "page" ? h("div", { style: { marginTop: "8px" } }, h("button.sm", { onclick: clearOverride }, "Clear page layout")) : null);
+  }
 
   const skip = h("input", { type: "checkbox", checked: p.skip });
   skip.onchange = async () => {
@@ -315,8 +378,11 @@ function renderSide() {
     } catch (e) { toast(e.message, "error"); }
   };
 
-  side.replaceChildren(
-    h("section", h("span.label", "Editing layout for"), seg(scopeOpts, scope, (v) => { scope = v; loadWorking(); renderAll(); }, true),
+  side.replaceChildren(...[
+    h("section", h("span.label", "Crop mode"), modeSeg,
+      pp ? h("label.check", { style: { marginTop: "10px" } }, oddEven, h("span", "Carry odd & even pages separately", h("div.hint", "For book scans where left and right pages have different margins: each page starts from the last crop of the same side.")))
+         : null),
+    pp ? null : h("section", h("span.label", "Editing layout for"), seg(scopeOpts, scope, (v) => { scope = v; loadWorking(); renderAll(); }, true),
       h("label.check", { style: { marginTop: "10px" } }, oddEven, h("span", "Different layouts for odd & even pages", h("div.hint", "For book scans where the margins alternate.")))),
     h("section", notice),
     h("section", h("span.label", "Draw"),
@@ -338,13 +404,13 @@ function renderSide() {
     h("section", h("span.label", "Page range"),
       h("div.range", "Pages", ra, "to", rb),
       h("div.row", { style: { marginTop: "8px" } },
-        h("button.sm", { title: "Copy the layout shown to every page in the range as its own layout", onclick: () => rangeAct({ layout: clone(working) }, "Layout applied") }, "Apply shown layout"),
-        h("button.sm", { onclick: () => rangeAct({ layout: null }, "Own layouts cleared") }, "Clear own layouts"),
+        h("button.sm", { title: "Copy the crop shown to every page in the range as its own crop", onclick: () => rangeAct({ layout: clone(working) }, "Crop applied") }, "Apply shown crop"),
+        h("button.sm", { onclick: () => rangeAct({ layout: null }, "Own crops cleared") }, "Clear own crops"),
         h("button.sm", { onclick: () => rangeAct({ skip: true }, "Skipped") }, "Skip"),
         h("button.sm", { onclick: () => rangeAct({ skip: false }, "Un-skipped") }, "Un-skip"))),
     h("hr"),
     h("button.primary", { style: { width: "100%", justifyContent: "center" }, onclick: () => ctx.showTab("process") }, "Continue to Process →"),
-  );
+  ].filter(Boolean));
 }
 
 async function clearOverride() {
@@ -352,7 +418,7 @@ async function clearOverride() {
   try {
     Object.assign(p, await api(`/api/pages/${p.id}`, { method: "PATCH", body: { clear_override: true } }));
     p.override = null;
-    if (scope === "page") scope = ctx.doc.layouts.use_odd_even ? ((p.index + 1) % 2 ? "odd" : "even") : "global";
+    if (scope === "page" && !perPage()) scope = ctx.doc.layouts.use_odd_even ? ((p.index + 1) % 2 ? "odd" : "even") : "global";
     loadWorking(); renderRail(); renderAll();
   } catch (e) { toast(e.message, "error"); }
 }

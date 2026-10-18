@@ -106,7 +106,7 @@ function renderOpts() {
   };
   const separate = ctx.doc.settings.footnote_mode === "separate";
 
-  optsCard.replaceChildren(
+  optsCard.replaceChildren(...[
     h("h3", "Export options"),
     h("span.label", "Page references"),
     chk("page_markers", "Insert original page markers", "Keeps citations to the printed edition."),
@@ -128,5 +128,5 @@ function renderOpts() {
       h("label.field", { style: { flex: 1, margin: 0 } }, h("span", "Page size"), select("page_size", [["letter", "US Letter"], ["a4", "A4"], ["a5", "A5"], ["6x9", "6 × 9 in"]])),
       h("label.field", { style: { margin: 0 } }, h("span", "Font pt"), text("font_size", { type: "number", min: 7, max: 18, step: 0.5 }))),
     chk("title_page", "Title page"),
-  );
+  ].filter(Boolean));
 }
