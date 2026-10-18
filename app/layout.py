@@ -49,19 +49,53 @@ def clean_layouts(layouts: Any) -> dict:
         "odd": clean_layout(layouts.get("odd")),
         "even": clean_layout(layouts.get("even")),
         "use_odd_even": bool(layouts.get("use_odd_even", False)),
+        # Page-by-page mode: a page without its own crop uses the nearest earlier page that has one.
+        "carry_forward": bool(layouts.get("carry_forward", True)),
     }
 
 
-def resolve(layouts: dict, index: int, override: dict | None) -> tuple[dict, str]:
-    """Return (layout, source) where source is 'page' | 'odd' | 'even' | 'global'."""
+def _base(L: dict, index: int) -> tuple[dict, str]:
+    if L["use_odd_even"]:
+        key = "odd" if (index + 1) % 2 == 1 else "even"
+        if L[key]:
+            return L[key], key
+    return L["global"], "global"
+
+
+def resolve_all(layouts: dict, pages: list[tuple[int, dict | None]]) -> dict[int, tuple[dict, str, int]]:
+    """Effective layout for every page: {index: (layout, source, from_page_number)}.
+
+    source is 'page' (its own crop), 'inherited' (carried forward from from_page_number),
+    'odd' | 'even' | 'global'.
+    """
+    L = clean_layouts(layouts)
+    last: dict = {"any": None, 0: None, 1: None}
+    out: dict[int, tuple[dict, str, int]] = {}
+    for index, override in sorted(pages, key=lambda x: x[0]):
+        parity = index % 2
+        if override:
+            lay = clean_layout(override)
+            out[index] = (lay, "page", index + 1)
+            last["any"] = last[parity] = (lay, index + 1)
+            continue
+        prev = (last[parity] if L["use_odd_even"] else last["any"]) if L["carry_forward"] else None
+        if prev:
+            out[index] = (prev[0], "inherited", prev[1])
+        else:
+            lay, src = _base(L, index)
+            out[index] = (lay, src, 0)
+    return out
+
+
+def resolve(layouts: dict, index: int, override: dict | None,
+            pages: list[tuple[int, dict | None]] | None = None) -> tuple[dict, str]:
+    """Return (layout, source) for one page. Pass `pages` (index, override) to honour carry-forward."""
     if override:
         return clean_layout(override), "page"
-    layouts = clean_layouts(layouts)
-    if layouts["use_odd_even"]:
-        key = "odd" if (index + 1) % 2 == 1 else "even"
-        if layouts[key]:
-            return layouts[key], key
-    return layouts["global"], "global"
+    if pages is not None:
+        lay, src, _ = resolve_all(layouts, [(i, o) for i, o in pages if i <= index] + [(index, None)])[index]
+        return lay, src
+    return _base(clean_layouts(layouts), index)
 
 
 def crop_box(im: Image.Image, box: dict | None) -> Image.Image:

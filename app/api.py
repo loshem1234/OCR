@@ -16,10 +16,10 @@ from starlette.background import BackgroundTask
 from . import storage
 from .auth import check_password, require_auth
 from .config import settings
-from .db import DEFAULT_DOC_SETTINGS, Document, Page, get_session
+from .db import DEFAULT_DOC_SETTINGS, Document, Page, get_session, session_scope
 from .export import EXPORTERS, ExportOptions, build_export
 from .ingest import ACCEPTED_EXTS, kind_of
-from .layout import clean_layout, clean_layouts, resolve
+from .layout import clean_layout, clean_layouts, resolve_all
 from .ocr.tesseract_engine import TESS_LANGS, installed_langs
 from .worker import worker
 
@@ -86,12 +86,21 @@ def _doc_json(doc: Document, counts: dict | None = None, full: bool = False) -> 
     return d
 
 
-def _page_summary(p: Page, layouts: dict) -> dict:
-    _layout, source = resolve(layouts, p.index, p.override)
+def _overrides(s: Session, doc_id: str) -> list[tuple[int, dict | None]]:
+    return [(i, o) for i, o in s.execute(select(Page.index, Page.override).where(Page.doc_id == doc_id))]
+
+
+def _effective(s: Session, doc: Document) -> dict[int, tuple[dict, str, int]]:
+    return resolve_all(doc.layouts, _overrides(s, doc.id))
+
+
+def _page_summary(p: Page, eff: tuple[dict, str, int]) -> dict:
+    _layout, source, from_page = eff
     return {
         "id": p.id, "index": p.index, "number": p.index + 1, "width": p.width, "height": p.height,
         "status": p.status, "engine": p.engine, "route_reason": p.route_reason, "confidence": p.confidence,
-        "skip": p.skip, "override": p.override, "layout_source": source, "edited": p.edited,
+        "skip": p.skip, "override": p.override, "layout_source": source, "layout_from": from_page,
+        "edited": p.edited,
         "reviewed": p.reviewed, "flags": len(p.low_conf or []), "has_text_layer": p.has_text_layer,
         "printed_page": p.printed_page, "error": p.error, "warning": p.warning,
         "facing": bool(p.right), "has_notes": bool(p.notes),
@@ -391,16 +400,17 @@ def cancel_doc(doc_id: str, s: Session = Depends(get_session)):
 @router.get("/docs/{doc_id}/pages", dependencies=authed)
 def list_pages(doc_id: str, s: Session = Depends(get_session)):
     doc = _get_doc(s, doc_id)
-    layouts = clean_layouts(doc.layouts)
-    return [_page_summary(p, layouts) for p in doc.pages]
+    eff = resolve_all(doc.layouts, [(p.index, p.override) for p in doc.pages])
+    return [_page_summary(p, eff[p.index]) for p in doc.pages]
 
 
 @router.get("/pages/{page_id}", dependencies=authed)
 def get_page(page_id: int, s: Session = Depends(get_session)):
     p = _get_page(s, page_id)
     doc = s.get(Document, p.doc_id)
-    layout, source = resolve(doc.layouts, p.index, p.override)
-    return {**_page_summary(p, clean_layouts(doc.layouts)), "body": p.body, "right": p.right, "notes": p.notes,
+    eff = _effective(s, doc)[p.index]
+    layout = eff[0]
+    return {**_page_summary(p, eff), "body": p.body, "right": p.right, "notes": p.notes,
             "low_conf": p.low_conf or [], "layout": layout, "tokens_in": p.tokens_in, "tokens_out": p.tokens_out}
 
 
@@ -441,7 +451,7 @@ def patch_page(page_id: int, body: PagePatch, s: Session = Depends(get_session))
         p.override = clean_layout(body.override)
     s.flush()
     doc = s.get(Document, p.doc_id)
-    return _page_summary(p, clean_layouts(doc.layouts))
+    return _page_summary(p, _effective(s, doc)[p.index])
 
 
 class RangeIn(BaseModel):
@@ -486,19 +496,36 @@ def _image_response(path: Path) -> FileResponse:
     return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
 
+# page id -> (doc id, index) never changes, so image requests don't need the database after the first hit.
+# Image endpoints must not hold a pooled connection while the file streams: a long book's thumbnail rail
+# fires dozens of parallel requests over HTTP/2, which would otherwise exhaust the pool.
+_page_loc: dict[int, tuple[str, int]] = {}
+
+
+def _locate(page_id: int) -> tuple[str, int]:
+    loc = _page_loc.get(page_id)
+    if loc is None:
+        with session_scope() as s:
+            row = s.execute(select(Page.doc_id, Page.index).where(Page.id == page_id)).first()
+        if row is None:
+            raise HTTPException(404, "Page not found")
+        loc = _page_loc[page_id] = (row[0], row[1])
+    return loc
+
+
 @router.get("/pages/{page_id}/image", dependencies=authed)
-def page_image(page_id: int, s: Session = Depends(get_session)):
-    p = _get_page(s, page_id)
-    path = storage.page_image_path(p.doc_id, p.index)
+def page_image(page_id: int):
+    doc_id, index = _locate(page_id)
+    path = storage.page_image_path(doc_id, index)
     if not path.exists():
-        path = storage.thumb_path(p.doc_id, p.index)  # purged: fall back to thumbnail
+        path = storage.thumb_path(doc_id, index)  # purged: fall back to thumbnail
     return _image_response(path)
 
 
 @router.get("/pages/{page_id}/thumb", dependencies=authed)
-def page_thumb(page_id: int, s: Session = Depends(get_session)):
-    p = _get_page(s, page_id)
-    return _image_response(storage.thumb_path(p.doc_id, p.index))
+def page_thumb(page_id: int):
+    doc_id, index = _locate(page_id)
+    return _image_response(storage.thumb_path(doc_id, index))
 
 
 @router.get("/docs/{doc_id}/thumb", dependencies=authed)

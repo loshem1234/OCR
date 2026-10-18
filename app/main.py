@@ -50,6 +50,17 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+@app.middleware("http")
+async def revalidate_static(request: Request, call_next):
+    """Make browsers revalidate JS/CSS on every load so a redeploy is picked up immediately."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
