@@ -353,3 +353,8 @@ kbd { font: 11px var(--ui); background: var(--panel-3); border: 1px solid var(--
   .stage { min-height: 70vh; }
   .sidepanel { width: auto; border-left: 0; border-top: 1px solid var(--line); }
 }
+
+/* thumbnail crop outlines */
+.rail .t .tw { position: relative; }
+.rail .t .crop { position: absolute; border: 1.5px solid var(--gold); box-shadow: 0 0 0 999px rgba(10, 8, 5, .35); pointer-events: none; }
+.rail .t .tw { overflow: hidden; border-radius: 2px; }
