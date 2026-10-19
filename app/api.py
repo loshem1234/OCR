@@ -459,6 +459,7 @@ class RangeIn(BaseModel):
     end: int
     layout: dict[str, Any] | None = None  # None clears overrides in the range
     skip: bool | None = None
+    isolate: bool = False                 # keep only start..end: skip everything else, un-skip inside
 
 
 @router.post("/docs/{doc_id}/pages/range", dependencies=authed)
@@ -466,6 +467,11 @@ def apply_range(doc_id: str, body: RangeIn, s: Session = Depends(get_session)):
     doc = _get_doc(s, doc_id)
     lo, hi = sorted((body.start, body.end))
     n = 0
+    if body.isolate:
+        for p in doc.pages:
+            p.skip = not (lo <= p.index + 1 <= hi)
+            n += 0 if p.skip else 1
+        return {"updated": n}
     for p in doc.pages:
         if lo <= p.index + 1 <= hi:
             if body.skip is not None:
