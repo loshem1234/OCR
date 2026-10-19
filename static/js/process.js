@@ -10,9 +10,12 @@ export function init(c, pane) {
   runCard = h("div.card");
   pagesCard = h("div.card");
   root.append(h("div.scrollpane", h("div.process-grid", h("div", settingsCard), h("div", runCard, pagesCard))));
-  ctx.on("doc", () => { renderRun(); if (!settingsCard.contains(document.activeElement)) renderSettings(); });
-  ctx.on("pages", () => { renderRun(); renderPages(); });
+  ctx.on("doc", () => { if (!typingIn(runCard)) renderRun(); if (!typingIn(settingsCard)) renderSettings(); });
+  ctx.on("pages", () => { if (!typingIn(runCard)) renderRun(); renderPages(); });
 }
+
+// Don't redraw a card while the user is typing in one of its fields (polling would reset the input).
+const typingIn = (card) => card.contains(document.activeElement) && document.activeElement.matches("input[type=text], input[type=number], textarea, select");
 
 export function show() { renderSettings(); renderRun(); renderPages(); }
 
@@ -88,8 +91,22 @@ function renderRun() {
   };
 
   const tokens = d.tokens_in + d.tokens_out;
-  runCard.replaceChildren(
+  const kept = ctx.pages.filter((x) => !x.skip);
+  const ra = h("input", { type: "number", min: 1, max: ctx.pages.length, value: String(kept[0]?.number || 1) });
+  const rb = h("input", { type: "number", min: 1, max: ctx.pages.length, value: String(kept[kept.length - 1]?.number || ctx.pages.length) });
+  const isolate = async (a, b) => {
+    try { const n = await ctx.isolate(a, b); toast(`Reading ${n} page(s); the rest are skipped.`, "ok"); }
+    catch (e) { toast(e.message, "error"); }
+  };
+  const rangeBox = ctx.pages.length ? h("div", { style: { margin: "4px 0 14px", padding: "12px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: "8px" } },
+    h("div.row", h("span.label", { style: { flex: 1 } }, "Pages to read"), h("span.hint", ctx.rangeSummary())),
+    h("div.row", { style: { marginTop: "8px" } }, h("span.hint", "Pages"), ra, h("span.hint", "to"), rb,
+      h("button.sm.primary", { disabled: busy, onclick: () => isolate(+ra.value, +rb.value) }, "Keep only this range"),
+      kept.length < ctx.pages.length ? h("button.sm", { disabled: busy, onclick: () => isolate(1, ctx.pages.length) }, "Include all pages") : null),
+    h("div.hint", { style: { marginTop: "6px" } }, "Skipped pages aren't read or exported. You can still skip single pages in Layout & crop.")) : null;
+  runCard.replaceChildren(...[
     h("div.row", h("h3", { style: { flex: 1, margin: 0 } }, "Run OCR"), pill(d.status)),
+    rangeBox,
     h("div.stats",
       h("div.stat", h("b", `${p.done}/${total}`), h("span", "pages read")),
       h("div.stat", h("b", p.queued + p.running), h("span", "in queue")),
@@ -108,7 +125,7 @@ function renderRun() {
         d.status === "paused" ? h("button.primary", { onclick: () => post("resume") }, "Resume") : null,
         busy || d.status === "paused" ? h("button.danger", { onclick: () => post("cancel") }, "Cancel queue") : null,
         d.status === "review" ? h("button", { onclick: () => ctx.showTab("review") }, "Go to Review →") : null)),
-  );
+  ].filter(Boolean));
 }
 
 async function post(what) {

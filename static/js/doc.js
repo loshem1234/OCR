@@ -21,6 +21,32 @@ const ctx = {
     if (tab) showTab(tab);
   },
   get page() { return ctx.pages[ctx.current]; },
+  // Move to the next/previous page that isn't skipped (falls back to plain stepping if all are skipped).
+  step(dir) {
+    if (ctx.pages.every((p) => p.skip)) return ctx.goto(ctx.current + dir);
+    for (let i = ctx.current + dir; i >= 0 && i < ctx.pages.length; i += dir) {
+      if (!ctx.pages[i].skip) return ctx.goto(i);
+    }
+  },
+  async isolate(start, end) {
+    const n = ctx.pages.length;
+    start = Math.max(1, Math.min(n, start | 0)); end = Math.max(1, Math.min(n, end | 0));
+    if (start > end) [start, end] = [end, start];
+    const r = await api(`/api/docs/${id}/pages/range`, { method: "POST", body: { start, end, isolate: true } });
+    await ctx.refreshDoc();
+    await ctx.refreshPages();
+    ctx.goto(start - 1);
+    return r.updated;
+  },
+  rangeSummary() {
+    const kept = ctx.pages.filter((p) => !p.skip);
+    if (!kept.length) return "No pages selected — every page is skipped.";
+    const a = kept[0].number, b = kept[kept.length - 1].number;
+    const contiguous = b - a + 1 === kept.length;
+    if (kept.length === ctx.pages.length) return `All ${ctx.pages.length} pages.`;
+    return contiguous ? `Pages ${a}–${b} (${kept.length} of ${ctx.pages.length}).`
+                      : `${kept.length} of ${ctx.pages.length} pages, between ${a} and ${b} (some skipped).`;
+  },
   async patchDoc(body) {
     ctx.doc = await api(`/api/docs/${id}`, { method: "PATCH", body });
     ctx.emit("doc");
@@ -132,7 +158,7 @@ async function poll() {
 
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, textarea, select")) return;
-    if (e.key === "ArrowRight" || e.key === "PageDown") { ctx.goto(ctx.current + 1); e.preventDefault(); }
-    if (e.key === "ArrowLeft" || e.key === "PageUp") { ctx.goto(ctx.current - 1); e.preventDefault(); }
+    if (e.key === "ArrowRight" || e.key === "PageDown") { ctx.step(1); e.preventDefault(); }
+    if (e.key === "ArrowLeft" || e.key === "PageUp") { ctx.step(-1); e.preventDefault(); }
   });
 })();

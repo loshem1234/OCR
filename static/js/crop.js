@@ -39,7 +39,7 @@ export function show() { if (built) { requestAnimationFrame(() => { layoutSheet(
 function maybeBuild() {
   const d = ctx.doc;
   if (built) {
-    if (!pending && !dragging && !side.contains(document.activeElement)) renderSide();
+    if (!pending && !dragging && !(side.contains(document.activeElement) && document.activeElement.matches("input[type=text], input[type=number], select"))) renderSide();
     return;
   }
   if (d.status === "ingesting" || !ctx.pages.length) {
@@ -68,9 +68,9 @@ function build() {
     h("button", { title: "Zoom in", onclick: () => setZoom(zoom * 1.25) }, "+"));
   const bar = h("div.stagebar",
     h("div.pageno",
-      h("button.icon.sm", { onclick: () => ctx.goto(ctx.current - 1), title: "Previous page (←)" }, "◀"),
+      h("button.icon.sm", { onclick: () => ctx.step(-1), title: "Previous page (←) — skips skipped pages" }, "◀"),
       "Page", pageInput, pageTotal,
-      h("button.icon.sm", { onclick: () => ctx.goto(ctx.current + 1), title: "Next page (→)" }, "▶")),
+      h("button.icon.sm", { onclick: () => ctx.step(1), title: "Next page (→) — skips skipped pages" }, "▶")),
     h("div", { style: { flex: 1 } }),
     h("span.hint", "Drag to draw · drag a box to move · handles resize · Shift-drag redraws · ← → pages"),
     zoomBtns);
@@ -402,12 +402,22 @@ function renderSide() {
     h("section", h("span.label", `Page ${p.number}`),
       h("label.check", skip, h("span", "Skip this page", h("div.hint", "Blank pages, plates and adverts. Skipped pages aren't read or exported.")))),
     h("section", h("span.label", "Page range"),
+      h("div.hint", { style: { marginBottom: "8px" } }, "Reading: ", ctx.rangeSummary()),
       h("div.range", "Pages", ra, "to", rb),
+      h("button.sm.primary", { style: { marginTop: "8px", width: "100%", justifyContent: "center" },
+        title: "Skip every page outside this range and include every page inside it",
+        onclick: async () => {
+          try { const n = await ctx.isolate(+ra.value, +rb.value); toast(`Keeping ${n} pages; everything else is skipped.`, "ok"); }
+          catch (e) { toast(e.message, "error"); }
+        } }, "Keep only these pages"),
       h("div.row", { style: { marginTop: "8px" } },
         h("button.sm", { title: "Copy the crop shown to every page in the range as its own crop", onclick: () => rangeAct({ layout: clone(working) }, "Crop applied") }, "Apply shown crop"),
         h("button.sm", { onclick: () => rangeAct({ layout: null }, "Own crops cleared") }, "Clear own crops"),
         h("button.sm", { onclick: () => rangeAct({ skip: true }, "Skipped") }, "Skip"),
-        h("button.sm", { onclick: () => rangeAct({ skip: false }, "Un-skipped") }, "Un-skip"))),
+        h("button.sm", { onclick: () => rangeAct({ skip: false }, "Un-skipped") }, "Un-skip"),
+        ctx.pages.some((x) => x.skip) ? h("button.sm", { title: "Un-skip every page", onclick: async () => {
+          try { await ctx.isolate(1, ctx.pages.length); toast("All pages included.", "ok"); } catch (e) { toast(e.message, "error"); }
+        } }, "Include all") : null)),
     h("hr"),
     h("button.primary", { style: { width: "100%", justifyContent: "center" }, onclick: () => ctx.showTab("process") }, "Continue to Process →"),
   ].filter(Boolean));
