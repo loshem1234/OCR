@@ -55,6 +55,13 @@ def test_end_to_end():
         c.patch(f"/api/pages/{pages[2]['id']}", json={"override": {**layouts["global"], "notes": None}})
         assert c.get(f"/api/docs/{doc_id}/pages").json()[2]["layout_source"] == "page"
 
+        # Keep only pages 2-3, then include everything again.
+        r = c.post(f"/api/docs/{doc_id}/pages/range", json={"start": 2, "end": 3, "isolate": True})
+        assert r.json()["updated"] == 2
+        assert [p["skip"] for p in c.get(f"/api/docs/{doc_id}/pages").json()] == [True, False, False]
+        c.post(f"/api/docs/{doc_id}/pages/range", json={"start": 1, "end": 3, "isolate": True})
+        assert not any(p["skip"] for p in c.get(f"/api/docs/{doc_id}/pages").json())
+
         r = c.post(f"/api/docs/{doc_id}/run", json={"scope": "all"})
         assert r.json()["queued"] == 3
         d = _wait(c, doc_id, {"review"})
