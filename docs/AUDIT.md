@@ -1,7 +1,7 @@
 # Transcription-path audit (Greek fidelity)
 
-Every step that text or page imagesch i pass through, what it could do to a Greek character, and what the
-scholarly Greek profile does about it. "Standard" = the original pipeline, whis unchanged for
+Every step that text or page images pass through, what it could do to a Greek character, and what the
+scholarly Greek profile does about it. "Standard" = the original pipeline, which is unchanged for
 non-Greek documents unless noted.
 
 | # | Step (file) | Risk found | Status |
