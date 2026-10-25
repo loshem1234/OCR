@@ -39,7 +39,7 @@ def _img(text="λόγος καὶ νοῦς ἐστιν ἡ ἀρχή"):
 def test_transcribe_parses_and_falls_back_on_config(monkeypatch):
     from google.genai import errors
 
-    gemini_engine._feature_state.update(thinking=True, media_resolution=True)
+    gemini_engine._unsupported.clear()
     fake = FakeModels([
         errors.ClientError(400, {"error": {"code": 400, "message": "thinking_level is not supported for this model", "status": "INVALID_ARGUMENT"}}),
         {"printed_page": "17", "body": "## Α\n\nλόγος [^1] ⟦17a⟧", "footnotes": ["1 cf. Plat."], "uncertain": ["λόγος"]},
@@ -50,7 +50,8 @@ def test_transcribe_parses_and_falls_back_on_config(monkeypatch):
     assert res.notes == "1 cf. Plat."
     assert res.low_conf == ["λόγος"]
     assert res.tokens_in == 1200 and res.tokens_out == 320
-    assert gemini_engine._feature_state["thinking"] is False
+    assert "thinking" in gemini_engine._unsupported[settings.gemini_model]
+    assert not gemini_engine._unsupported.get("some-other-model")  # a rejection never leaks to other models
     assert fake.calls[1].config.thinking_config is None
     prompt = fake.calls[1].contents[-1]
     assert "⟦17a⟧" in prompt and "Ancient Greek" in prompt

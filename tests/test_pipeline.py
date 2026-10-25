@@ -97,4 +97,3 @@ def test_end_to_end():
         assert c.get(f"/api/docs/{doc_id}").json()["images_purged"] is True
         assert c.delete(f"/api/docs/{doc_id}").status_code == 200
         assert c.get(f"/api/docs/{doc_id}").status_code == 404
-    shutil.rmtree(DATA, ignore_errors=True)
