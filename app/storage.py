@@ -48,11 +48,35 @@ def image_ext() -> str:
 
 def page_image_path(doc_id: str, index: int) -> Path:
     d = pages_dir(doc_id)
-    for ext in ("jpg", "png"):
+    for ext in ("png", "jpg"):
         p = d / f"{index + 1:04d}.{ext}"
         if p.exists():
             return p
     return d / f"{index + 1:04d}.{image_ext()}"
+
+
+def preview_path(doc_id: str, index: int) -> Path:
+    return doc_dir(doc_id) / "previews" / f"{index + 1:04d}.jpg"
+
+
+def display_image(doc_id: str, index: int) -> Path:
+    """Browser display copy. Lossless masters can be several MB; the crop/review views get a JPEG preview
+    (≤2400 px). OCR always reads the master, never this file."""
+    master = page_image_path(doc_id, index)
+    if master.suffix.lower() != ".png" or not master.exists() or master.stat().st_size < 1_500_000:
+        return master
+    prev = preview_path(doc_id, index)
+    if prev.exists() and prev.stat().st_mtime >= master.stat().st_mtime:
+        return prev
+    from PIL import Image
+    prev.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(master) as im:
+        im = im.convert("L")
+        if max(im.size) > 2400:
+            f = 2400 / max(im.size)
+            im = im.resize((int(im.width * f), int(im.height * f)), Image.LANCZOS)
+        im.save(prev, "JPEG", quality=88)
+    return prev
 
 
 def thumb_path(doc_id: str, index: int) -> Path:
@@ -80,6 +104,7 @@ def purge_images(doc_id: str) -> None:
     """Free space but keep the OCR text: drop page images and originals, keep thumbnails."""
     shutil.rmtree(pages_dir(doc_id), ignore_errors=True)
     shutil.rmtree(source_dir(doc_id), ignore_errors=True)
+    shutil.rmtree(doc_dir(doc_id) / "previews", ignore_errors=True)
 
 
 def storage_report() -> dict:

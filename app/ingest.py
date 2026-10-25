@@ -68,7 +68,7 @@ def count_pages(path: Path, kind: str) -> int:
 
 # ---------------------------------------------------------------- iterators
 
-def _normalize(im: Image.Image) -> Image.Image:
+def _normalize(im: Image.Image, scholarly: bool = False) -> Image.Image:
     im = ImageOps.exif_transpose(im)
     if im.mode != "L":
         if im.mode in ("RGBA", "LA", "P"):
@@ -78,33 +78,79 @@ def _normalize(im: Image.Image) -> Image.Image:
             im = bg
         im = im.convert("L")
     w, h = im.size
-    if max(w, h) > MAX_SIDE:
-        s = MAX_SIDE / max(w, h)
+    limit = settings.scholarly_max_side if scholarly else MAX_SIDE
+    if max(w, h) > limit:
+        s = limit / max(w, h)
         im = im.resize((int(w * s), int(h * s)), Image.LANCZOS)
     return im
 
 
-def iter_pdf(path: Path) -> Iterator[tuple[Image.Image, bool]]:
+def native_scan_dpi(page) -> int | None:
+    """If the PDF page is essentially one scanned image, its native resolution (pixels per inch)."""
+    try:
+        infos = page.get_image_info()
+    except Exception:
+        return None
+    area = page.rect.width * page.rect.height or 1
+    best = None
+    for info in infos:
+        bx = pymupdf.Rect(info.get("bbox", (0, 0, 0, 0)))
+        if bx.width <= 0 or (bx.width * bx.height) / area < 0.6:
+            continue
+        dpi = info.get("width", 0) / (bx.width / 72.0)
+        best = max(best or 0, dpi)
+    return int(round(best)) if best else None
+
+
+def choose_dpi(page, scholarly: bool) -> tuple[int, int | None]:
+    """(render dpi, native scan dpi). Scholarly: render at the scan's own resolution (clamped), so no source
+    pixel is thrown away and none is invented; vector/text pages use SCHOLARLY_RENDER_DPI."""
+    native = native_scan_dpi(page)
+    if not scholarly:
+        return settings.render_dpi, native
+    if native:
+        return max(settings.scholarly_min_dpi, min(settings.scholarly_max_dpi, native)), native
+    return settings.scholarly_render_dpi, None
+
+
+def iter_pdf(path: Path, scholarly: bool = False) -> Iterator[tuple[Image.Image, bool, dict]]:
+    max_side = settings.scholarly_max_side if scholarly else MAX_SIDE
     with pymupdf.open(path) as d:
         for page in d:
             rect = page.rect
-            zoom = settings.render_dpi / 72.0
+            dpi, native = choose_dpi(page, scholarly)
+            zoom = dpi / 72.0
             longest = max(rect.width, rect.height) * zoom
-            if longest > MAX_SIDE:
-                zoom = MAX_SIDE / max(rect.width, rect.height)
+            capped = False
+            if longest > max_side:
+                zoom = max_side / max(rect.width, rect.height)
+                capped = True
             pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), colorspace=pymupdf.csGRAY, alpha=False)
             im = Image.frombytes("L", (pix.width, pix.height), pix.samples)
             has_text = len(page.get_text("text").strip()) > 40
-            yield im, has_text
+            yield im, has_text, {"source": "pdf", "dpi": int(round(zoom * 72)), "native_dpi": native,
+                                 "capped": capped}
 
 
-def iter_image(path: Path) -> Iterator[tuple[Image.Image, bool]]:
+def _image_dpi(im: Image.Image) -> int | None:
+    try:
+        d = im.info.get("dpi")
+        return int(round(float(d[0]))) if d and float(d[0]) > 50 else None
+    except Exception:
+        return None
+
+
+def iter_image(path: Path, scholarly: bool = False) -> Iterator[tuple[Image.Image, bool, dict]]:
     with Image.open(path) as im:
+        dpi = _image_dpi(im)
+        fmt = im.format
         for frame in ImageSequence.Iterator(im):
-            yield _normalize(frame.copy()), False
+            out = _normalize(frame.copy(), scholarly)
+            yield out, False, {"source": f"image/{(fmt or '').lower()}", "dpi": dpi, "native_dpi": dpi,
+                               "capped": out.size != frame.size}
 
 
-def iter_djvu(path: Path) -> Iterator[tuple[Image.Image, bool]]:
+def iter_djvu(path: Path, scholarly: bool = False) -> Iterator[tuple[Image.Image, bool, dict]]:
     tmp = Path(tempfile.mkdtemp(dir=storage.tmp_dir()))
     try:
         n = count_pages(path, "djvu")
@@ -115,13 +161,13 @@ def iter_djvu(path: Path) -> Iterator[tuple[Image.Image, bool]]:
                 check=True, capture_output=True, timeout=300,
             )
             with Image.open(out) as im:
-                yield _normalize(im.copy()), False
+                yield _normalize(im.copy(), scholarly), False, {"source": "djvu", "dpi": _image_dpi(im)}
             out.unlink(missing_ok=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def iter_zip(path: Path) -> Iterator[tuple[Image.Image, bool]]:
+def iter_zip(path: Path, scholarly: bool = False) -> Iterator[tuple[Image.Image, bool, dict]]:
     with zipfile.ZipFile(path) as z:
         names = sorted(
             (n for n in z.namelist()
@@ -130,8 +176,9 @@ def iter_zip(path: Path) -> Iterator[tuple[Image.Image, bool]]:
         )
         for n in names:
             with z.open(n) as f, Image.open(f) as im:
+                dpi = _image_dpi(im)
                 for frame in ImageSequence.Iterator(im):
-                    yield _normalize(frame.copy()), False
+                    yield _normalize(frame.copy(), scholarly), False, {"source": "zip", "dpi": dpi, "file": n}
 
 
 ITERATORS = {"pdf": iter_pdf, "image": iter_image, "djvu": iter_djvu, "zip": iter_zip}
@@ -139,10 +186,10 @@ ITERATORS = {"pdf": iter_pdf, "image": iter_image, "djvu": iter_djvu, "zip": ite
 
 # ---------------------------------------------------------------- main entry
 
-def _save_page(doc_id: str, index: int, im: Image.Image) -> None:
+def _save_page(doc_id: str, index: int, im: Image.Image, lossless: bool = False) -> str:
     storage.pages_dir(doc_id).mkdir(parents=True, exist_ok=True)
     storage.thumbs_dir(doc_id).mkdir(parents=True, exist_ok=True)
-    ext = storage.image_ext()
+    ext = "png" if lossless else storage.image_ext()
     out = storage.pages_dir(doc_id) / f"{index + 1:04d}.{ext}"
     if ext == "png":
         im.save(out, "PNG", optimize=True)
@@ -150,7 +197,8 @@ def _save_page(doc_id: str, index: int, im: Image.Image) -> None:
         im.save(out, "JPEG", quality=settings.jpeg_quality, optimize=True)
     th = im.copy()
     th.thumbnail((220, 320))
-    th.save(storage.thumb_path(doc_id, index), "JPEG", quality=80)
+    th.save(storage.thumb_path(doc_id, index), "JPEG", quality=80)  # thumbnails are never OCR input
+    return ext
 
 
 def ingest_document(doc_id: str) -> None:
@@ -159,6 +207,8 @@ def ingest_document(doc_id: str) -> None:
         if doc is None:
             return
         sources = list(doc.source_files)
+        from .ocr.scholarly import PROFILE, profile_for
+        scholarly = profile_for(dict(doc.settings or {})) == PROFILE
         # Restart-safe: wipe any half-finished previous attempt.
         for p in list(doc.pages):
             s.delete(p)
@@ -181,11 +231,13 @@ def ingest_document(doc_id: str) -> None:
         index = 0
         for sf in sources:
             sf_start = index
-            for im, has_text in ITERATORS[sf["kind"]](src_dir / sf["stored"]):
-                _save_page(doc_id, index, im)
+            for im, has_text, meta in ITERATORS[sf["kind"]](src_dir / sf["stored"], scholarly):
+                fmt = _save_page(doc_id, index, im, lossless=scholarly)
+                meta = {**meta, "stored_format": fmt, "lossless": fmt == "png", "width": im.width, "height": im.height,
+                        "profile": "scholarly_greek" if scholarly else "standard"}
                 with session_scope() as s:
                     s.add(Page(doc_id=doc_id, index=index, width=im.width, height=im.height,
-                               has_text_layer=has_text))
+                               has_text_layer=has_text, image_meta=meta))
                     doc = s.get(Document, doc_id)
                     doc.ingest_done = index + 1
                 index += 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from starlette.background import BackgroundTask
 from . import storage
 from .auth import check_password, require_auth
 from .config import settings
-from .db import DEFAULT_DOC_SETTINGS, Document, Page, get_session, session_scope
+from .db import DEFAULT_DOC_SETTINGS, Document, Page, PageRevision, get_session, session_scope
 from .export import EXPORTERS, ExportOptions, build_export
 from .ingest import ACCEPTED_EXTS, kind_of
 from .layout import clean_layout, clean_layouts, resolve_all
@@ -80,7 +81,9 @@ def _doc_json(doc: Document, counts: dict | None = None, full: bool = False) -> 
         "tokens_in": c.get("tokens_in", 0), "tokens_out": c.get("tokens_out", 0),
     }
     if full:
+        from .ocr.scholarly import profile_for
         d["settings"] = {**DEFAULT_DOC_SETTINGS, **(doc.settings or {})}
+        d["effective_profile"] = profile_for(d["settings"])
         d["layouts"] = clean_layouts(doc.layouts)
         d["export_options"] = doc.export_options or {}
     return d
@@ -104,7 +107,15 @@ def _page_summary(p: Page, eff: tuple[dict, str, int]) -> dict:
         "reviewed": p.reviewed, "flags": len(p.low_conf or []), "has_text_layer": p.has_text_layer,
         "printed_page": p.printed_page, "error": p.error, "warning": p.warning,
         "facing": bool(p.right), "has_notes": bool(p.notes),
+        "text_format": p.text_format or "prose", "profile": p.profile or "",
+        "witness_status": ("human-reviewed" if p.reviewed and p.witness_status else p.witness_status or ""),
+        "disagreements": _n_disagreements(p),
     }
+
+
+def _n_disagreements(p: Page) -> int:
+    c = p.collation or {}
+    return sum(int(r.get("substantive", 0)) for r in (c.get("regions") or {}).values())
 
 
 def _safe_name(name: str) -> str:
@@ -127,6 +138,8 @@ def _clean_settings(raw: dict, base: dict | None = None) -> dict:
             s[k] = bool(raw[k])
     if "hint" in raw:
         s["hint"] = str(raw["hint"] or "")[:1000]
+    if raw.get("profile") in ("", "standard", "scholarly_greek"):
+        s["profile"] = raw["profile"]
     return s
 
 
@@ -161,6 +174,10 @@ def config():
         "accepted": sorted(ACCEPTED_EXTS),
         "max_upload_mb": settings.max_upload_mb,
         "export_formats": list(EXPORTERS.keys()),
+        "scholarly": {"mode": settings.scholarly_greek, "primary": settings.scholarly_primary,
+                      "tesseract_model_dir": settings.scholarly_tessdata_dir or "system",
+                      "gemini_model": settings.scholarly_gemini_model if settings.gemini_enabled else None,
+                      "reconcile": settings.scholarly_reconcile},
     }
 
 
@@ -410,7 +427,8 @@ def get_page(page_id: int, s: Session = Depends(get_session)):
     doc = s.get(Document, p.doc_id)
     eff = _effective(s, doc)[p.index]
     layout = eff[0]
-    return {**_page_summary(p, eff), "body": p.body, "right": p.right, "notes": p.notes,
+    return {**_page_summary(p, eff), "collation": p.collation, "provenance": p.provenance, "image_meta": p.image_meta,
+            "revisions": len(p.revisions), "body": p.body, "right": p.right, "notes": p.notes,
             "low_conf": p.low_conf or [], "layout": layout, "tokens_in": p.tokens_in, "tokens_out": p.tokens_out}
 
 
@@ -431,6 +449,8 @@ def patch_page(page_id: int, body: PagePatch, s: Session = Depends(get_session))
     text_changed = False
     for field in ("body", "right", "notes"):
         val = getattr(body, field)
+        if val is not None:
+            val = unicodedata.normalize("NFC", val)  # one storage normalization for everything (canonical only)
         if val is not None and val != getattr(p, field):
             setattr(p, field, val)
             text_changed = True
@@ -520,9 +540,9 @@ def _locate(page_id: int) -> tuple[str, int]:
 
 
 @router.get("/pages/{page_id}/image", dependencies=authed)
-def page_image(page_id: int):
+def page_image(page_id: int, full: int = 0):
     doc_id, index = _locate(page_id)
-    path = storage.page_image_path(doc_id, index)
+    path = storage.page_image_path(doc_id, index) if full else storage.display_image(doc_id, index)
     if not path.exists():
         path = storage.thumb_path(doc_id, index)  # purged: fall back to thumbnail
     return _image_response(path)
@@ -558,8 +578,93 @@ def export(doc_id: str, fmt: str, request: Request, s: Session = Depends(get_ses
 def preview(doc_id: str, request: Request, s: Session = Depends(get_session)):
     """Assembled markdown for the export pane's live preview (first ~40k chars)."""
     doc = _get_doc(s, doc_id)
-    opts = ExportOptions.from_query(dict(request.query_params))
+    from .export import prepare_options
+    opts = prepare_options(doc, ExportOptions.from_query(dict(request.query_params)))
     from .export.assemble import assemble
     from .export.render_text import render_markdown
     md = render_markdown(assemble(doc, opts), doc, opts)
     return {"markdown": md[:40000], "truncated": len(md) > 40000, "chars": len(md)}
+
+
+# ------------------------------------------------------------------ witnesses, history, audit
+
+@router.get("/pages/{page_id}/recognitions", dependencies=authed)
+def page_recognitions(page_id: int, raw: int = 0, s: Session = Depends(get_session)):
+    """Every engine's untouched reading of this page (newest run first)."""
+    p = _get_page(s, page_id)
+    out = []
+    for r in sorted(p.recognitions, key=lambda r: r.id, reverse=True):
+        out.append({"id": r.id, "run_id": r.run_id, "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "engine": r.engine, "region": r.region, "status": r.status, "model": r.model,
+                    "engine_version": r.engine_version, "config": r.config, "text": r.text, "lines": r.lines,
+                    "tokens_in": r.tokens_in, "tokens_out": r.tokens_out, "latency_ms": r.latency_ms,
+                    "warnings": r.warnings, **({"raw": r.raw} if raw else {})})
+    return out
+
+
+@router.get("/pages/{page_id}/revisions", dependencies=authed)
+def page_revisions(page_id: int, s: Session = Depends(get_session)):
+    p = _get_page(s, page_id)
+    return [{"id": r.id, "created_at": r.created_at.isoformat() if r.created_at else None, "reason": r.reason,
+             "edited": r.edited, "reviewed": r.reviewed, "engine": r.engine, "text_format": r.text_format,
+             "witness_status": r.witness_status, "chars": len(r.body or "") + len(r.right or "") + len(r.notes or ""),
+             "preview": (r.body or "")[:160]}
+            for r in sorted(p.revisions, key=lambda r: r.id, reverse=True)]
+
+
+@router.post("/pages/{page_id}/revisions/{rev_id}/restore", dependencies=authed)
+def restore_revision(page_id: int, rev_id: int, s: Session = Depends(get_session)):
+    """Bring back an earlier text. The current text is itself snapshotted first, so nothing is lost."""
+    from .ocr.scholarly import snapshot
+    p = _get_page(s, page_id)
+    rev = s.get(PageRevision, rev_id)
+    if rev is None or rev.page_id != page_id:
+        raise HTTPException(404, "Revision not found")
+    snapshot(s, p, "before restore")
+    p.body, p.right, p.notes = rev.body, rev.right, rev.notes
+    p.text_format = rev.text_format or "prose"
+    p.printed_page = rev.printed_page or p.printed_page
+    p.edited, p.reviewed = rev.edited, rev.reviewed
+    if p.status == "new":
+        p.status = "done"
+    s.flush()
+    doc = s.get(Document, p.doc_id)
+    return _page_summary(p, _effective(s, doc)[p.index])
+
+
+@router.get("/docs/{doc_id}/collation.json", dependencies=authed)
+def collation_report(doc_id: str, raw: int = 0, s: Session = Depends(get_session)):
+    """Machine-readable audit of the whole document: per page, both witnesses' lines, every disagreement with
+    its category, location and any proposal, the working text, and review status."""
+    import json as _json
+
+    from fastapi.responses import Response
+    doc = _get_doc(s, doc_id)
+    pages = []
+    for p in doc.pages:
+        latest = {}
+        for r in sorted(p.recognitions, key=lambda r: r.id):
+            if r.engine in ("tesseract", "gemini"):
+                latest[(r.engine, r.region)] = r
+        run = (p.collation or {}).get("run_id")
+        pages.append({
+            "page_id": p.id, "page_number": p.index + 1, "printed_page": p.printed_page, "skipped": p.skip,
+            "profile": p.profile, "text_format": p.text_format, "witness_status": p.witness_status,
+            "human_reviewed": p.reviewed, "edited_by_user": p.edited,
+            "verification": "human-reviewed" if p.reviewed else (
+                "engines agree (NOT verified against the page)" if p.witness_status == "engines-agree" else
+                "unverified"),
+            "provenance": p.provenance,
+            "witnesses": {f"{e}:{reg}": {"status": r.status, "model": r.model, "run_id": r.run_id,
+                                         "lines": [l.get("text") for l in (r.lines or [])],
+                                         **({"raw": r.raw} if raw else {})}
+                          for (e, reg), r in latest.items() if not run or r.run_id == run},
+            "collation": p.collation,
+            "working_text": p.body, "right": p.right, "notes": p.notes,
+            "warnings": [w for w in (p.warning or "").splitlines() if w],
+        })
+    body = _json.dumps({"document": {"id": doc.id, "title": doc.title, "author": doc.author,
+                                     "settings": doc.settings}, "pages": pages}, ensure_ascii=False, indent=1)
+    name = re.sub(r"[^\w\- ]+", "", doc.title).strip().replace(" ", "_") or "document"
+    return Response(body, media_type="application/json; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}_collation.json"'})

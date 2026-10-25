@@ -26,12 +26,24 @@ class Worker:
         self._thread: threading.Thread | None = None
 
     # ---- lifecycle
-    def start(self) -> None:
+    @staticmethod
+    def requeue_interrupted() -> tuple[int, list[str]]:
+        """Anything that was mid-flight when the process died goes back in the queue."""
         with session_scope() as s:
-            # Anything that was mid-flight when the process died goes back in the queue.
+            n = 0
             for p in s.scalars(select(Page).where(Page.status == "running")):
                 p.status = "queued"
+                n += 1
             ingesting = [d.id for d in s.scalars(select(Document).where(Document.status == "ingesting"))]
+        return n, ingesting
+
+    def start(self) -> None:
+        if self._stop.is_set():  # restarted within the same process (tests, reloads): fresh pools
+            self.ocr_pool = ThreadPoolExecutor(max_workers=settings.ocr_concurrency, thread_name_prefix="ocr")
+            self.ingest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ingest")
+            self._stop = threading.Event()
+            self._inflight = set()
+        _n, ingesting = self.requeue_interrupted()
         for doc_id in ingesting:
             self.submit_ingest(doc_id)
         self._thread = threading.Thread(target=self._loop, name="scheduler", daemon=True)
