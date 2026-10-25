@@ -49,8 +49,17 @@ function renderSettings() {
   hint.value = s.hint || "";
   hint.oninput = () => set("hint", hint.value);
 
+  const prof = h("select", h("option", { value: "" }, "Automatic"), h("option", { value: "scholarly_greek" }, "Scholarly Greek (two independent readings)"),
+    h("option", { value: "standard" }, "Standard"));
+  prof.value = s.profile || "";
+  prof.onchange = () => set("profile", prof.value);
+  const eff = ctx.doc.effective_profile === "scholarly_greek";
   settingsCard.replaceChildren(
     h("h3", "Reading settings"),
+    h("label.field", h("span", "Processing profile"), prof,
+      h("div.hint", eff
+        ? "Scholarly Greek: Tesseract (Ancient Greek model) and Gemini read each page independently; differences are listed in Review. Text is kept one printed line per line. Applies automatically when the languages are Ancient Greek (with Latin)."
+        : "Standard OCR. Choose Scholarly Greek for critical editions in polytonic Greek.")),
     h("div.field", h("span", "Languages on the page"), langChips(cfg, s.languages, (v) => set("languages", v))),
     h("label.field", h("span", "OCR engine"), engineSel, engHint),
     h("div.field", h("span", "Footnotes & apparatus"), fn,

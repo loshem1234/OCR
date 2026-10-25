@@ -6,6 +6,7 @@ let opts = null;
 let previewEl, statsEl, optsCard;
 
 const DEFAULTS = {
+  join_lines: true, greek_punct: false,
   page_markers: true, marker_format: "[p. {n}]", first_number: 1, use_printed: true, join_pages: true,
   include_notes: true, notes_placement: "end", refs: "inline", page_size: "letter", font_size: 11, title_page: true,
 };
@@ -45,6 +46,10 @@ function build() {
     const b = h("button.fmt", { onclick: () => download(f, b) }, h("b", name), h("span", desc));
     return b;
   }));
+  if (ctx.pages.some((p) => p.text_format === "lines")) {
+    fmtGrid.append(h("a.fmt", { href: `/api/docs/${ctx.id}/collation.json`, style: { textDecoration: "none" } },
+      h("b", "Collation"), h("span", "JSON audit: both engines' lines, every disagreement, provenance, review status")));
+  }
   root.append(h("div.scrollpane", h("div.export-grid",
     h("div", optsCard),
     h("div", h("div.row", { style: { marginBottom: "10px" } }, h("h3", { style: { margin: 0, flex: 1 } }, "Download"), statsEl), fmtGrid,
@@ -128,5 +133,8 @@ function renderOpts() {
       h("label.field", { style: { flex: 1, margin: 0 } }, h("span", "Page size"), select("page_size", [["letter", "US Letter"], ["a4", "A4"], ["a5", "A5"], ["6x9", "6 × 9 in"]])),
       h("label.field", { style: { margin: 0 } }, h("span", "Font pt"), text("font_size", { type: "number", min: 7, max: 18, step: 0.5 }))),
     chk("title_page", "Title page"),
+    ctx.pages.some((p) => p.text_format === "lines") ? h("div", h("hr"), h("span.label", "Scholarly Greek"),
+      chk("join_lines", "Join printed lines into paragraphs", "Off = diplomatic export, one printed line per line. Hyphenated line ends are rejoined only when joining."),
+      chk("greek_punct", "Greek punctuation code points", "Write the ano teleia as U+0387 and the question mark as U+037E. (Unicode normalization treats them as · and ;.)")) : null,
   ].filter(Boolean));
 }
