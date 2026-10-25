@@ -18,6 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-noto-core fonts-gfs-didot fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
+# Scholarly Greek profile: Tesseract's larger "best" Ancient Greek model (benchmarked against the fast model
+# Debian ships — see README). Pinned to an upstream commit and checked by SHA-256 in docker/fetch_models.py.
+COPY docker/fetch_models.py /tmp/fetch_models.py
+RUN python /tmp/fetch_models.py && rm /tmp/fetch_models.py
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt

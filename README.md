@@ -46,6 +46,173 @@ When Gemini reads a page it also reports the **printed page number**, used for `
 
 ---
 
+## Scholarly Greek profile
+
+> The printed image is the authority. OCR engines are witnesses. AI corrections are proposals.
+> Only human-reviewed readings belong in the master text.
+
+The scholarly Greek profile is for printed critical editions in polytonic Greek, such as Deubner/Klein's
+Iamblichus, *De vita Pythagorica*. It works behind the same four tabs. Nothing about cropping, page ranges or
+queueing changes.
+
+**When it applies.** Automatically, when a document's languages are Ancient Greek, optionally with Latin or
+modern Greek. A document is pinned either way with *Processing profile* in the Process tab. The environment
+variable `SCHOLARLY_GREEK=never` switches it off everywhere, and `always` forces it on. English-only, Hebrew,
+Arabic and mixed-language documents keep the standard pipeline.
+
+### How a page is read
+
+1. **Lossless master.** On import, each page is stored as PNG at the scan's own resolution, between 300 and
+   600 dpi. Vector or text-only PDF pages are rendered at 400 dpi. The DPI and format are recorded per page.
+   Thumbnails and the browser preview are JPEG, but OCR never reads them. Pages imported *before* the upgrade
+   stay JPEG and are flagged. Re-import such a document to get lossless masters.
+2. **Your crop** comes from the existing layout system, unchanged. The app warns when a crop edge touches print
+   (a line or accent may be clipped) and when the footnote box cuts into the main box.
+3. **Two independent readings of the same pixels**, neither of which ever sees the other's output:
+   * **A — Tesseract**, Ancient Greek only. It uses the pinned `tessdata_best` model, segmentation mode 6, mild
+     contrast, scaled to about 400 dpi. If the Greek model is missing, the reading is recorded as *unavailable*.
+     It is never read with English instead.
+   * **B — Gemini**, as a strict diplomatic transcriber. It gets lossless PNG strips cut only through fully blank
+     rows, so a cut can never pass through a letter or accent. It returns physical printed lines: no joining,
+     no Markdown, no hyphen rejoining, no "corrections". Every answer is schema-validated: numbering, one line
+     per entry, no JSON fragments or placeholders, and a line count checked against the lines detected in the
+     image. A bad answer is retried, then rejected. It is never silently accepted.
+4. **Collation** (`app/ocr/collation.py`) compares the two at the word and letter level after NFC
+   normalization, so precomposed and decomposed spellings are *not* differences. Each disagreement is
+   classified and tied to a line of each witness: accent, breathing, iota subscript, diaeresis, letters,
+   punctuation, editorial sign, omission, addition, duplication, whole-line omission, reordering, script mix
+   (e.g. a Latin *o* inside a Greek word), and line-end word division.
+5. **Proposals.** Optionally (`SCHOLARLY_RECONCILE=on`), for up to `SCHOLARLY_RECONCILE_MAX` disagreements per
+   page, Gemini is shown *only the image of that printed line* and both readings, in a randomized order. It is
+   asked what the ink shows; grammar is explicitly irrelevant. The result is stored as a **proposal**. It never
+   changes the text.
+6. **Working text** = the primary witness's lines (Gemini by default; `SCHOLARLY_PRIMARY=tesseract` to change),
+   one printed line per line. Words involved in disagreements are highlighted in Review, which lists each
+   disagreement with **Use Tesseract / Use Gemini / Use proposal** buttons.
+7. **Status, never overstated.** A page is one of:
+   * *2 engines agree* — **not** verified: both engines can misread the same mark;
+   * *N disagreements*;
+   * *1 reading only* — for example Gemini unavailable or over budget; shown as not cross-checked;
+   * *✓ reviewed* — only you can set this, by marking the page reviewed.
+
+### What is stored (nothing is overwritten)
+
+| layer | where |
+|---|---|
+| A. raw Tesseract output (full TSV), lines with word boxes and confidences, config, model, version | `recognitions` (engine `tesseract`) |
+| B. raw Gemini responses (every attempt, including rejected ones), validated lines, model, settings, tokens, latency | `recognitions` (engine `gemini`) |
+| collation, with every item's category, both readings, line positions and proposal | `pages.collation_data` |
+| proposals (raw responses) | `recognitions` (engine `reconcile`) |
+| your reviewed text | `pages.body` / `right` / `notes` (line format) |
+| previous versions — saved automatically before any re-run or restore | `page_revisions` (Review → **History** → Restore) |
+| provenance: crop, image DPI/format, engines, settings, run id | `pages.provenance` |
+
+**Export → Collation (JSON)** downloads all of this for the whole document as an audit file (`?raw=1` adds the
+raw responses).
+
+### Unicode policy
+
+Text is stored and compared in **NFC**. NFC is canonical normalization: it never removes a mark or changes a
+letter. It does unify spellings Unicode defines as identical:
+
+* oxia letters become tonos letters;
+* ano teleia U+0387 becomes U+00B7;
+* the Greek question mark U+037E becomes `;`;
+* combining koronis U+0343 becomes U+0313.
+
+No NFKC/NFKD, accent stripping, monotonic conversion or transliteration is used anywhere. Export → *Greek
+punctuation code points* writes U+0387 and U+037E after Greek letters, for publishers who need them. Bear in
+mind that any later NFC normalization will turn them back.
+
+### Exports
+
+Line-format pages are joined into prose **only at export**: *Join printed lines into paragraphs*, with
+hyphenated line ends rejoined. Turn joining off for a diplomatic, line-by-line export. `%verse` blocks keep
+their line breaks. In this profile `*` and `_` are literal text, never formatting. Apparatus is excluded when
+footnotes are set to "Drop". TXT output is plain UTF-8 NFC with no OCR metadata; untick page markers if you
+don't want them.
+
+### Configuration
+
+| variable | default | meaning |
+|---|---|---|
+| `SCHOLARLY_GREEK` | `auto` | `auto` (Ancient Greek documents), `always`, `never` |
+| `SCHOLARLY_TESSDATA_DIR` | `/usr/share/tesseract-ocr/5/tessdata_best` if present | where the Greek model lives |
+| `SCHOLARLY_TESS_LANGS` | `grc` | `+`-separated; all must be installed, or the reading is marked unavailable |
+| `SCHOLARLY_TESS_PSM` | `6` | Tesseract page segmentation mode |
+| `SCHOLARLY_TESS_PREPROCESS` | `contrast` | `gray`, `contrast`, `otsu`, `sauvola`, `legacy` |
+| `SCHOLARLY_TESS_TARGET_DPI` | `400` | Tesseract's working resolution (the master is not changed) |
+| `SCHOLARLY_RENDER_DPI` | `400` | rendering resolution for vector PDF pages |
+| `SCHOLARLY_MIN_DPI` / `SCHOLARLY_MAX_DPI` | `300` / `600` | clamp for native scan resolution |
+| `SCHOLARLY_MAX_SIDE` | `9000` | pixel cap for masters (recorded if hit) |
+| `SCHOLARLY_GEMINI_MODEL` | `GEMINI_MODEL` | model for transcription and proposals |
+| `SCHOLARLY_SEGMENT_LINES` | `10` | printed lines per Gemini strip |
+| `SCHOLARLY_MEDIA_RESOLUTION` | `MEDIA_RESOLUTION_HIGH` | per-image resolution (`…_ULTRA_HIGH` is available; benchmark it) |
+| `SCHOLARLY_THINKING_LEVEL` | `GEMINI_THINKING_LEVEL` | Gemini thinking level for transcription |
+| `SCHOLARLY_PRIMARY` | `gemini` | which witness becomes the working text |
+| `SCHOLARLY_RECONCILE` / `SCHOLARLY_RECONCILE_MAX` | `on` / `12` | proposals per page |
+| `SCHOLARLY_INVALID_RETRIES` | `2` | retries for a rejected Gemini answer |
+| `GEMINI_DOC_TOKEN_BUDGET` | `30000000` | per-document token cap; past it, pages get a Tesseract reading only, with a warning |
+| `GEMINI_SEED` | `0` | best-effort reproducibility (empty string to omit) |
+
+**Recommended production settings for Deubner** — the defaults, plus:
+
+```
+SCHOLARLY_GREEK=auto
+GEMINI_MODEL=gemini-3.6-flash          # or a Pro model, once the real benchmark shows it reads better
+SCHOLARLY_RECONCILE=on
+OCR_CONCURRENCY=3
+GEMINI_DOC_TOKEN_BUDGET=30000000
+```
+
+Rough cost: each page is 3–4 strip calls (≈1.7 k tokens in, ≈0.9 k out each, including the page image), plus
+up to 12 short proposal calls. That is about 20–27 k tokens per page, or 10–14 M tokens for a 500-page book:
+roughly $15–25 at late-2026 Flash prices, and about double after Google's January 2027 price change. These
+are estimates. The real figure for every page is recorded, and the Process tab shows the running total.
+
+### Benchmarks
+
+`tools/benchmark.py` measures, against **verified** transcriptions:
+
+* character error rate;
+* grapheme-cluster error rate;
+* per-diacritic errors (acute, grave, circumflex, both breathings, iota subscript, diaeresis);
+* accent and breathing substitutions;
+* editorial-symbol errors;
+* word error rate;
+* missing, extra and duplicated lines;
+* time and tokens per page.
+
+It covers the standard pipeline, Tesseract variants, Gemini, dual reading, and dual reading with proposals,
+plus any external engine via `--external`. Interim results on synthetic pages, and the commands for the real
+Deubner benchmark (still pending), are in [docs/BENCHMARK_SYNTHETIC.md](docs/BENCHMARK_SYNTHETIC.md). The
+transcription-path audit is in [docs/AUDIT.md](docs/AUDIT.md).
+
+### Migration and rollback
+
+* **Upgrade.** Deploy as usual. On start-up the app creates two new tables (`recognitions`, `page_revisions`)
+  and *adds* six nullable/defaulted columns to `pages` (`text_format`, `profile`, `witness_status`,
+  `collation_data`, `provenance`, `image_meta`). Nothing is dropped or renamed. Existing pages read as
+  `text_format = 'prose'` and export exactly as before. Tested against a Postgres database created by the
+  previous release.
+* **Rollback.** Redeploy the previous commit. It ignores the extra tables and columns. Pages read with the
+  scholarly profile keep their line-format text; the old exporter prints it with the printed line breaks kept
+  instead of joining them into prose. Re-export after upgrading again. To remove the additions entirely (optional):
+  `DROP TABLE recognitions, page_revisions; ALTER TABLE pages DROP COLUMN text_format, DROP COLUMN profile, DROP COLUMN witness_status, DROP COLUMN collation_data, DROP COLUMN provenance, DROP COLUMN image_meta;`
+
+### Limits (what still needs your eyes)
+
+* **No engine output is verified until you review it against the image.** Engines agreeing proves nothing about
+  shared misreadings, such as a faint breathing both engines miss.
+* Tesseract is weak on editorial signs (⟨ ⟩, †) and the ano teleia, so expect those disagreements on every
+  page. Gemini's accuracy on Deubner is **unmeasured**: the real benchmark is pending.
+* Gemini's per-line positions are approximate (taken from detected text bands), so proposals for lines Tesseract
+  lacks use a wider crop.
+* Facing text is supported within a page, not across Loeb-style facing pages.
+* Kraken is not integrated; it can be compared through the benchmark's `--external` option.
+
+---
+
 ## Deploy on Railway
 
 1. **Create a GitHub repo** and push this folder:
@@ -143,7 +310,13 @@ app/
   layout.py          crop-layout resolution (page > odd/even > all) and region cutting
   worker.py          in-process, restart-safe OCR queue
   ocr/
-    tesseract_engine.py   line-geometry paragraphing, hyphen rejoining, headings, word confidence
+    scholarly.py          scholarly Greek profile: independent dual reading, proposals, provenance
+    collation.py          Unicode-aware comparison of two witnesses (categories, line positions)
+    greek.py              NFC policy, grapheme clusters, diacritic names, artifact detection
+    segment.py            text-line bands, blank-row strips, crop-edge checks, preprocessing variants
+    metrics.py            CER / grapheme / diacritic / symbol / WER / completeness metrics
+    tesseract_engine.py   line-geometry paragraphing, hyphen rejoining, headings, word confidence;
+                          strict line-level recognizer for the scholarly profile
     gemini_engine.py      structured-JSON transcription prompt, retries, config fallback
     embedded_engine.py    PDF text layer clipped to crop boxes
     router.py             hybrid routing and result storage
@@ -154,6 +327,10 @@ app/
     render_docx.py   Word
     render_epub.py   EPUB 3 with embedded Noto fonts
 static/              vanilla-JS frontend (no build step)
+tools/benchmark.py   accuracy benchmark against verified transcriptions
+tools/synth_greek.py synthetic polytonic test pages with exact ground truth
+docker/fetch_models.py  pinned, checksum-verified tessdata_best Greek model (Docker build)
+docs/                audit of the transcription path; interim benchmark
 tests/               end-to-end smoke tests
 ```
 
