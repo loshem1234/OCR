@@ -25,8 +25,17 @@ def _slug(title: str) -> str:
     return s[:80] or "document"
 
 
+def prepare_options(doc: Document, opts: ExportOptions) -> ExportOptions:
+    """Scholarly-profile documents: asterisks and underscores are printed signs, not formatting."""
+    from ..ocr.scholarly import PROFILE, profile_for
+    if profile_for(doc.settings or {}) == PROFILE or any((p.text_format or "") == "lines" for p in doc.pages):
+        opts.markup = False
+    return opts
+
+
 def build_export(_s: Session, doc: Document, fmt: str, opts: ExportOptions) -> tuple[str, str, str]:
     media, ext = EXPORTERS[fmt]
+    opts = prepare_options(doc, opts)
     a = assemble(doc, opts)
     fd, path = tempfile.mkstemp(suffix=f".{ext}", dir=storage.tmp_dir())
     with open(fd, "wb") as f:

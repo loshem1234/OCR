@@ -14,7 +14,7 @@ FONT_STACK = '"Noto Serif", "GFS Didot", "Noto Serif Hebrew", "Noto Naskh Arabic
 
 def inline(text: str, opts: ExportOptions) -> str:
     out = []
-    for kind, v in tokens(text):
+    for kind, v in tokens(text, opts.markup):
         e = html.escape(v)
         if kind == "text":
             out.append(e)

@@ -54,6 +54,39 @@ def parse_blocks(md: str) -> list[Block]:
     return out
 
 
+def parse_line_blocks(text: str, join: bool) -> list[Block]:
+    """Line-format (scholarly) text: one printed line per line, blank line between paragraphs,
+    '## ' heading lines, '%verse' before verse. Joining printed lines into prose happens here, at export,
+    so the stored line evidence is never altered."""
+    from ..ocr.textutil import join_lines
+    out = []
+    for chunk in re.split(r"\n\s*\n", (text or "").strip()):
+        lines = [l.rstrip() for l in chunk.split("\n") if l.strip()]
+        if not lines:
+            continue
+        if lines[0].strip() == "%verse":
+            if lines[1:]:
+                out.append(Block("para", "\n".join(lines[1:])))
+            continue
+        rest = []
+        for l in lines:
+            m = re.match(r"^(#{1,6})\s+(.*)$", l)
+            if m:
+                if rest:
+                    out.append(Block("para", join_lines(rest) if join else "\n".join(rest)))
+                    rest = []
+                out.append(Block("heading", m.group(2).strip(), level=len(m.group(1))))
+            else:
+                rest.append(l)
+        if rest:
+            out.append(Block("para", join_lines(rest) if join else "\n".join(rest)))
+    return out
+
+
+def _blocks_for(text: str, fmt: str, opts) -> list[Block]:
+    return parse_line_blocks(text, opts.join_lines) if fmt == "lines" else parse_blocks(text)
+
+
 def _filter(blocks: list[Block], drop_fn: bool, hide_refs: bool) -> list[Block]:
     for b in blocks:
         if drop_fn:
@@ -80,12 +113,13 @@ def assemble(doc: Document, opts: ExportOptions) -> Assembled:
         used += 1
         label = page_label(p, opts)
         mk = marker(label) if opts.page_markers else ""
-        body = _filter(parse_blocks(p.body), drop_fn, hide_refs)
+        fmt = getattr(p, "text_format", None) or "prose"
+        body = _filter(_blocks_for(p.body, fmt, opts), drop_fn, hide_refs)
 
         if p.right:
             if mk:
                 blocks.append(Block("marker", mk))
-            blocks.append(Block("facing", left=body, right=_filter(parse_blocks(p.right), drop_fn, hide_refs)))
+            blocks.append(Block("facing", left=body, right=_filter(_blocks_for(p.right, fmt, opts), drop_fn, hide_refs)))
             can_join = False
         else:
             first = body[0] if body else None
@@ -117,4 +151,14 @@ def assemble(doc: Document, opts: ExportOptions) -> Assembled:
             else:
                 notes.append((label, n))
 
+    if opts.greek_punct:
+        from ..ocr.greek import greek_punctuation
+
+        def gp(bl):
+            for b in bl:
+                b.text = greek_punctuation(b.text)
+                gp(b.left)
+                gp(b.right)
+        gp(blocks)
+        notes = [(lab, greek_punctuation(t)) for lab, t in notes]
     return Assembled(blocks=blocks, notes=notes, page_count=used)

@@ -37,7 +37,7 @@ def _rtl(paragraph) -> None:
 
 
 def _add_inline(paragraph, text: str, opts: ExportOptions, rtl: bool) -> None:
-    for kind, v in tokens(text):
+    for kind, v in tokens(text, opts.markup):
         if kind == "br":
             paragraph.add_run().add_break(WD_BREAK.LINE)
             continue

@@ -12,14 +12,23 @@ TOKEN_RE = re.compile(
     r"|(?P<br>\n)"
 )
 
+PLAIN_RE = re.compile(
+    r"(?P<pg>\ue000(?P<pgv>[^\ue001]*)\ue001)"
+    r"|(?P<fn>\[\^(?P<fnv>[^\]\s]{1,8})\])"
+    r"|(?P<ref>⟦(?P<refv>[^⟧]{0,40})⟧)"
+    r"|(?P<b>(?!))(?P<bv>(?!))|(?P<i>(?!))(?P<iv>(?!))"
+    r"|(?P<br>\n)"
+)
+
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
-def tokens(text: str) -> list[tuple[str, str]]:
-    """Return a list of (kind, value): text | italic | bold | fn | ref | page | br."""
+def tokens(text: str, markup: bool = True) -> list[tuple[str, str]]:
+    """Return a list of (kind, value): text | italic | bold | fn | ref | page | br.
+    With markup=False, asterisks are literal text (critical editions print * and ** as signs)."""
     out: list[tuple[str, str]] = []
     pos = 0
-    for m in TOKEN_RE.finditer(text):
+    for m in (TOKEN_RE if markup else PLAIN_RE).finditer(text):
         if m.start() > pos:
             out.append(("text", text[pos:m.start()]))
         kind = m.lastgroup if m.lastgroup in ("br",) else next(

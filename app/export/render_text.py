@@ -5,6 +5,7 @@ import html
 
 from ..db import Document
 from .assemble import Assembled, Block
+from ..ocr.greek import greek_ratio
 from .inline import superscript, tokens
 from .options import ExportOptions
 
@@ -13,7 +14,7 @@ from .options import ExportOptions
 
 def _txt_inline(text: str, opts: ExportOptions) -> str:
     out = []
-    for kind, v in tokens(text):
+    for kind, v in tokens(text, opts.markup):
         if kind in ("text", "italic", "bold"):
             out.append(v)
         elif kind == "page":
@@ -32,7 +33,8 @@ def _txt_blocks(blocks: list[Block], opts: ExportOptions) -> list[str]:
     for b in blocks:
         if b.kind == "heading":
             t = _txt_inline(b.text, opts)
-            parts.append(t.upper() if b.level == 1 else t)
+            # never upper-case Greek: str.upper() turns ᾳ into ΑΙ and drops accents
+            parts.append(t.upper() if b.level == 1 and greek_ratio(t) == 0 else t)
         elif b.kind in ("para", "marker"):
             parts.append(_txt_inline(b.text, opts))
         elif b.kind == "facing":
@@ -57,9 +59,10 @@ def render_txt(a: Assembled, doc: Document, opts: ExportOptions) -> str:
 
 def _md_inline(text: str, opts: ExportOptions) -> str:
     out = []
-    for kind, v in tokens(text):
+    for kind, v in tokens(text, opts.markup):
         if kind == "text":
-            out.append(v)
+            # in literal mode a printed * must stay a * in every Markdown viewer
+            out.append(v if opts.markup else v.replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_"))
         elif kind == "italic":
             out.append(f"*{v}*")
         elif kind == "bold":

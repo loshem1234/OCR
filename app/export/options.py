@@ -24,6 +24,9 @@ class ExportOptions:
     page_size: str = "letter"
     font_size: float = 11.0
     title_page: bool = True
+    join_lines: bool = True        # line-format (scholarly) pages: join printed lines into paragraphs
+    greek_punct: bool = False      # write ano teleia U+0387 / Greek question mark U+037E after Greek letters
+    markup: bool = True            # parse *italic*/**bold** (off for the scholarly profile; set by the exporter)
 
     @classmethod
     def from_query(cls, q: dict) -> "ExportOptions":
@@ -49,6 +52,8 @@ class ExportOptions:
         except ValueError:
             pass
         d.title_page = _bool(q.get("title_page"), d.title_page)
+        d.join_lines = _bool(q.get("join_lines"), d.join_lines)
+        d.greek_punct = _bool(q.get("greek_punct"), d.greek_punct)
         return d
 
     def to_dict(self) -> dict:
