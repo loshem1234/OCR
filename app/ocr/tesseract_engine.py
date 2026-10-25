@@ -125,7 +125,7 @@ def ocr_region(im: Image.Image, langs: list[str], detect_headings: bool = True) 
             confs.append((conf, len(word)))
             if conf < settings.low_conf_word:
                 ww = word.strip(STRIP)
-                if len(ww) >= 2:
+                if ww and any(c.isalpha() for c in ww):  # one-letter words (ὁ, ἡ, ὦ, ἤ) count too
                     low[ww] = None
 
     blocks = _paragraphs(list(lines.values()), detect_headings)
@@ -143,3 +143,124 @@ def ocr_region(im: Image.Image, langs: list[str], detect_headings: bool = True) 
 def plain(im: Image.Image, langs: list[str]) -> OcrResult:
     """Footnote regions: no heading detection."""
     return ocr_region(im, langs, detect_headings=False)
+
+
+# =============================================================================================
+# Scholarly profile: strict language models, geometry kept, nothing reformatted.
+# =============================================================================================
+
+class LanguageUnavailable(RuntimeError):
+    """A required Tesseract model is missing. Never substitute another language for it."""
+
+
+def available_langs(tessdata_dir: str = "") -> set[str]:
+    try:
+        cfg = f'--tessdata-dir "{tessdata_dir}"' if tessdata_dir else ""
+        return {l for l in pytesseract.get_languages(config=cfg) if l != "osd"}
+    except Exception:
+        return set()
+
+
+def strict_lang_string(langs: list[str], tessdata_dir: str = "") -> str:
+    have = available_langs(tessdata_dir)
+    missing = [l for l in langs if l not in have]
+    if missing or not langs:
+        where = tessdata_dir or "the default tessdata directory"
+        raise LanguageUnavailable(f"Tesseract model(s) {', '.join(missing) or '(none requested)'} not installed in {where}")
+    return "+".join(langs)
+
+
+def tesseract_version() -> str:
+    try:
+        return str(pytesseract.get_tesseract_version())
+    except Exception:
+        return "unknown"
+
+
+def _split_mark_strips(lines: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Polytonic pages: Tesseract sometimes reads the row of accents/breathings above a line as a separate
+    'line' of junk (e.g. "Ξ .“. 5 , 3"). Such a pseudo-line is much shorter than a text line and contains
+    few real Greek letters. It is set aside (kept for audit), never silently merged into the text."""
+    from .greek import script_of
+    heights = sorted(l["bbox"][3] - l["bbox"][1] for l in lines)
+    med = heights[len(heights) // 2] or 1
+    keep, drop = [], []
+    for l in lines:
+        h = l["bbox"][3] - l["bbox"][1]
+        letters = [c for c in l["text"] if c.isalpha()]
+        greek = sum(1 for c in letters if script_of(c) == "greek")
+        words = [w for w in l["text"].split() if any(c.isalpha() for c in w)]
+        avg_word = (sum(len(w) for w in words) / len(words)) if words else 0
+        conf = [w["conf"] for w in l["words"] if w["conf"] >= 0]
+        mean_conf = sum(conf) / len(conf) if conf else 0
+        junk = (h < 0.6 * med and (avg_word < 2.6 or mean_conf < 55)) or (not letters) or \
+               (greek / max(1, len(letters)) < 0.5 and mean_conf < 60)
+        (drop if junk else keep).append(l)
+    return keep, drop
+
+
+def recognize_lines(im: Image.Image, langs: list[str], *, psm: int = 6, tessdata_dir: str = "",
+                    preprocess_mode: str = "gray", scale: float = 1.0, extra_config: str = "",
+                    drop_mark_strips: bool = True) -> dict:
+    """Read a region and return physical lines with word geometry and confidence — no reformatting.
+
+    Returns {"lines": [{"n", "text", "bbox", "words": [{"text","conf","bbox"}], "para_start"}],
+             "confidence", "word_count", "low_conf", "raw" (TSV), "config"}.
+    bboxes are in the coordinate system of `im` (pixels), before any scaling.
+    """
+    from .greek import nfc
+    from .segment import preprocess
+
+    lang = strict_lang_string(langs, tessdata_dir)
+    pre = preprocess(im, preprocess_mode, scale)
+    sx, sy = im.width / max(pre.width, 1), im.height / max(pre.height, 1)
+    cfg = f"--oem 1 --psm {int(psm)} -c preserve_interword_spaces=1"
+    if tessdata_dir:
+        cfg = f'--tessdata-dir "{tessdata_dir}" ' + cfg
+    if extra_config:
+        cfg += " " + extra_config
+    raw = pytesseract.image_to_data(pre, lang=lang, config=cfg)
+    rows = [r.split("\t") for r in raw.splitlines()]
+    header, body = rows[0], rows[1:]
+    col = {k: i for i, k in enumerate(header)}
+    lines: "OrderedDict[tuple, dict]" = OrderedDict()
+    confs, low = [], OrderedDict()
+    for r in body:
+        if len(r) < len(header):
+            continue
+        text = r[col["text"]]
+        if not text.strip():
+            continue
+        try:
+            conf = float(r[col["conf"]])
+        except ValueError:
+            conf = -1.0
+        l, t, w, h = (int(r[col[k]]) for k in ("left", "top", "width", "height"))
+        bbox = [round(l * sx), round(t * sy), round((l + w) * sx), round((t + h) * sy)]
+        key = (int(r[col["block_num"]]), int(r[col["par_num"]]), int(r[col["line_num"]]))
+        ln = lines.setdefault(key, {"words": [], "par": key[:2]})
+        ln["words"].append({"text": nfc(text), "conf": conf, "bbox": bbox})
+        if conf >= 0:
+            confs.append((conf, len(text)))
+            if conf < settings.low_conf_word and any(c.isalpha() for c in text):
+                low[nfc(text)] = None
+    out, prev_par = [], None
+    for ln in lines.values():
+        ws = ln["words"]
+        bx = [min(w["bbox"][0] for w in ws), min(w["bbox"][1] for w in ws),
+              max(w["bbox"][2] for w in ws), max(w["bbox"][3] for w in ws)]
+        out.append({"n": 0, "text": " ".join(w["text"] for w in ws), "bbox": bx, "words": ws,
+                    "para_start": ln["par"] != prev_par})
+        prev_par = ln["par"]
+    suppressed = []
+    if drop_mark_strips and len(out) >= 3:
+        out, suppressed = _split_mark_strips(out)
+    for i, ln in enumerate(out):
+        ln["n"] = i + 1
+    total = sum(n for _, n in confs)
+    mean = round(sum(c * n for c, n in confs) / total, 1) if total else None
+    return {"lines": out, "suppressed_lines": suppressed, "confidence": mean, "word_count": len(confs),
+            "low_conf": list(low)[:500],
+            "raw": raw, "config": {"lang": lang, "psm": psm, "oem": 1, "preprocess": preprocess_mode, "scale": scale,
+                                   "drop_mark_strips": drop_mark_strips,
+                                   "tessdata_dir": tessdata_dir or "default", "version": tesseract_version()}}

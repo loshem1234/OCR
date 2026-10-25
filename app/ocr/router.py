@@ -71,12 +71,25 @@ def _needs_gemini(res: OcrResult, langs: list[str]) -> str:
 
 
 def run_page(page_id: int) -> None:
+    from . import scholarly
+
     with session_scope() as s:
         page = s.get(Page, page_id)
         if page is None:  # document deleted while queued
             return
         doc = s.get(Document, page.doc_id)
         ds = dict(doc.settings or {})
+        forced_engine = page.forced_engine
+    if scholarly.profile_for(ds) == scholarly.PROFILE and forced_engine != "embedded" and \
+            not (ds.get("engine") == "embedded"):
+        engine_pref = forced_engine or {"tesseract": "tesseract", "gemini": "gemini"}.get(ds.get("engine", ""), "")
+        scholarly.run_page(page_id, engine_pref)
+        return
+    with session_scope() as s:
+        page = s.get(Page, page_id)
+        if page is None:
+            return
+        doc = s.get(Document, page.doc_id)
         overrides = [(i, o) for i, o in s.execute(
             select(Page.index, Page.override).where(Page.doc_id == page.doc_id, Page.index <= page.index))]
         layout, _src = resolve(doc.layouts, page.index, page.override, overrides)
@@ -142,6 +155,7 @@ def run_page(page_id: int) -> None:
         page = s.get(Page, page_id)
         if page is None or page.status != "running":  # deleted, cancelled or re-queued meanwhile
             return
+        scholarly.snapshot(s, page, "before OCR re-run")
         page.body = clean_text(result.body)
         page.right = clean_text(result.right)
         page.notes = clean_text(result.notes)
@@ -156,4 +170,7 @@ def run_page(page_id: int) -> None:
         page.edited = False
         page.reviewed = False
         page.forced_engine = ""
+        page.text_format = "prose"
+        page.profile = "standard"
+        page.witness_status = "single-witness"
         page.status = "done"
