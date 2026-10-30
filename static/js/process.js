@@ -45,6 +45,22 @@ function renderSettings() {
     return h("label.check", i, h("span", label, h("div.hint", hint)));
   };
   const textLayerPages = ctx.pages.filter((p) => p.has_text_layer).length;
+  const splitChk = h("input", { type: "checkbox", checked: !!s.split_spreads });
+  splitChk.onchange = async () => {
+    const want = splitChk.checked;
+    const textPages = ctx.pages.filter((p) => p.status === "done").length;
+    const msg = want
+      ? "Re-import this book, cutting every landscape two-page scan into a left and a right page?"
+      : "Re-import this book without splitting two-page scans?";
+    const warn = textPages ? `\n\n${textPages} page(s) already have OCR text. Re-importing replaces all pages, so that text and its history will be discarded.` : "";
+    if (!confirm(msg + warn + "\n\nPage sizes change, so check the crop boxes afterwards (per-page crops are not kept).")) { splitChk.checked = !want; return; }
+    try {
+      await api(`/api/docs/${ctx.id}/reimport`, { method: "POST", body: { split_spreads: want, confirm_discard_text: textPages > 0 } });
+      toast("Re-importing…", "ok");
+      await ctx.refreshDoc(); await ctx.refreshPages();
+      ctx.showTab("layout");
+    } catch (e) { splitChk.checked = !want; toast(e.message, "error"); }
+  };
   const hint = h("textarea", { rows: 3 });
   hint.value = s.hint || "";
   hint.oninput = () => set("hint", hint.value);
@@ -66,6 +82,7 @@ function renderSettings() {
       h("div.hint", "“Keep as notes” reads the blue footnote box (and footnotes Gemini finds) into a separate notes field, exported as endnotes.")),
     chk("preserve_refs", "Preserve reference numbers", "Stephanus, Bekker, chapter and line numbers become inline markers like ⟦17a⟧. In hybrid mode this sends every page to Gemini, so keep marginal numbers inside the main box."),
     chk("use_text_layer", `Use the PDF's text layer${textLayerPages ? ` (${textLayerPages} pages have one)` : " (none found)"}`, "Free and exact for born-digital PDFs. Old scans often carry poor hidden OCR.", !textLayerPages),
+    h("label.check", splitChk, h("span", "Split two-page scans", h("div.hint", "Cut each landscape scan (two book pages side by side) at the gutter into a left and a right page. Changing this re-imports the book."))),
     h("label.field", h("span", "Notes for the transcriber"), hint, h("div.hint", "Passed to Gemini, e.g. edition, script peculiarities, abbreviations to keep.")),
     h("p.hint", cfg.gemini_enabled ? `Gemini model: ${cfg.gemini_model}. Hybrid sends pages below ${cfg.hybrid_threshold}% Tesseract confidence to Gemini.` : "Gemini is not configured on the server — Tesseract only."),
   );

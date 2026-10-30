@@ -158,7 +158,7 @@ async function loadPage() {
   lastStatus[detail.id] = detail.status;
   dirty = false;
   saveState.textContent = "";
-  const src = `/api/pages/${detail.id}/image`;
+  const src = `/api/pages/${detail.id}/image${detail.spread ? `?v=${detail.spread.split_x}` : ""}`;
   if (!img.src.endsWith(src)) img.src = src; else fitSheet();
   renderBar();
   renderText();

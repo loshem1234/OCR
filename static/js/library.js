@@ -17,7 +17,7 @@ const bulkBar = h("div.row");
 function uploadCard() {
   const state = {
     files: [], languages: ["eng"], engine: config.gemini_enabled ? "auto" : "tesseract",
-    footnote_mode: "drop", preserve_refs: false, use_text_layer: false, combine: true,
+    footnote_mode: "drop", preserve_refs: false, use_text_layer: false, combine: true, split_spreads: false,
   };
   const fileInput = h("input", { type: "file", multiple: true, accept: config.accepted.join(","), style: { display: "none" } });
   const fileList = h("div.files");
@@ -77,6 +77,7 @@ function uploadCard() {
     fd.append("preserve_refs", state.preserve_refs);
     fd.append("use_text_layer", state.use_text_layer);
     fd.append("combine", state.combine);
+    fd.append("split_spreads", state.split_spreads);
     fd.append("hint", hintIn.value);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/docs");
@@ -117,6 +118,7 @@ function uploadCard() {
       h("div.field", h("span", "Footnotes & apparatus"), fnSeg),
       check("preserve_refs", "Preserve reference numbers", "Keeps Stephanus, Bekker and line numbers as inline markers like ⟦17a⟧. Sends pages to Gemini."),
       check("use_text_layer", "Use the PDF's own text layer if it has one", "Best for born-digital PDFs. Old scans often carry poor hidden OCR, so leave this off for those."),
+      check("split_spreads", "Split two-page scans", "Each landscape scan (two book pages side by side) becomes a left and a right page, cut at the gutter. Portrait scans stay single."),
       combineRow,
       h("label.field", h("span", "Notes for the transcriber (optional)"), hintIn),
       go, prog,

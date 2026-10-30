@@ -168,7 +168,7 @@ function renderAll(newPage = false) {
   pageInput.value = p.number;
   pageTotal.textContent = `of ${ctx.pages.length}`;
   if (newPage || !img.src) {
-    const src = `/api/pages/${p.id}/image`;
+    const src = `/api/pages/${p.id}/image${imgVersion(p)}`;
     if (!img.src.endsWith(src)) img.src = src;
   }
   [...rail.children].forEach((t, i) => t.classList.toggle("on", i === ctx.current));
@@ -193,7 +193,10 @@ function renderRail() {
     if (p.skip) badges.push(h("span.badge.red", "SKIP"));
     if (p.has_text_layer) badges.push(h("span.badge", { title: "PDF text layer present" }, "TXT"));
     let im = thumbCache.get(p.id);
-    if (!im) { im = h("img", { src: `/api/pages/${p.id}/thumb`, loading: "lazy", alt: "" }); thumbCache.set(p.id, im); }
+    const tsrc = `/api/pages/${p.id}/thumb${imgVersion(p)}`;
+    if (!im || !im.src.endsWith(tsrc)) { im = h("img", { src: tsrc, loading: "lazy", alt: "" }); thumbCache.set(p.id, im); }
+    if (p.spread && !p.spread.auto) { /* split adjusted by hand */ }
+    else if (p.spread && p.spread.confidence < 0.6) badges.push(h("span.badge.gold", { title: "Automatic split of this two-page scan is uncertain — check it" }, "SPLIT?"));
     const m = eff[i]?.main;
     const crop = m ? h("div.crop", { style: { left: pct(m.x), top: pct(m.y), width: pct(m.w), height: pct(m.h) } }) : null;
     return h(`div.t${i === ctx.current ? ".on" : ""}${p.skip ? ".skip" : ""}`, { onclick: () => ctx.goto(i) },
@@ -399,6 +402,7 @@ function renderSide() {
       seg([["single", "Single", "One column of text"], ["columns", "2 columns", "Read the left column, then the right"], ["facing", "Parallel", "Facing texts (e.g. Greek | English) kept side by side"]],
         working.mode, (v) => { working.mode = v; renderBoxes(); renderSide(); save(); }),
       working.mode !== "single" ? h("div.hint", { style: { marginTop: "6px" } }, "Drag the dashed line to where the columns divide.") : null),
+    p.spread ? spreadSection(p) : null,
     h("section", h("span.label", `Page ${p.number}`),
       h("label.check", skip, h("span", "Skip this page", h("div.hint", "Blank pages, plates and adverts. Skipped pages aren't read or exported.")))),
     h("section", h("span.label", "Page range"),
@@ -431,4 +435,47 @@ async function clearOverride() {
     if (scope === "page" && !perPage()) scope = ctx.doc.layouts.use_odd_even ? ((p.index + 1) % 2 ? "odd" : "even") : "global";
     loadWorking(); renderRail(); renderAll();
   } catch (e) { toast(e.message, "error"); }
+}
+
+
+// ------------------------------------------------------------------ two-page scans
+export function imgVersion(p) {
+  return p && p.spread ? `?v=${p.spread.split_x}` : "";
+}
+
+function spreadSection(p) {
+  const sp = p.spread;
+  let frac = sp.split_x / sp.spread_width;
+  const line = h("div", { style: { position: "absolute", top: 0, bottom: 0, width: "0", borderLeft: "2px dashed var(--gold-2)", left: `${frac * 100}%`, pointerEvents: "none" } });
+  const shade = h("div", { style: { position: "absolute", top: 0, bottom: 0, background: "rgba(201,164,92,.18)", pointerEvents: "none",
+    left: sp.side === "left" ? "0" : `${frac * 100}%`, width: sp.side === "left" ? `${frac * 100}%` : `${(1 - frac) * 100}%` } });
+  const pic = h("img", { src: `/api/pages/${p.id}/spread?v=${sp.split_x}`, alt: "", style: { width: "100%", display: "block" } });
+  const box = h("div", { style: { position: "relative", cursor: "col-resize", border: "1px solid var(--line-2)", borderRadius: "4px", overflow: "hidden", background: "#fff" } }, pic, shade, line);
+  const apply = h("button.sm.primary", { disabled: true }, "Apply new split");
+  const pct = h("span.hint", `${(frac * 100).toFixed(1)}%`);
+  const set = (f) => {
+    frac = Math.max(0.05, Math.min(0.95, f));
+    line.style.left = `${frac * 100}%`;
+    shade.style.left = sp.side === "left" ? "0" : `${frac * 100}%`;
+    shade.style.width = sp.side === "left" ? `${frac * 100}%` : `${(1 - frac) * 100}%`;
+    pct.textContent = `${(frac * 100).toFixed(1)}%`;
+    apply.disabled = Math.abs(frac - sp.split_x / sp.spread_width) < 0.0005;
+  };
+  box.addEventListener("click", (e) => { const r = box.getBoundingClientRect(); set((e.clientX - r.left) / r.width); });
+  const nudge = (d) => set(frac + d);
+  apply.onclick = async () => {
+    try {
+      const res = await api(`/api/pages/${p.id}/resplit`, { method: "POST", body: { fraction: frac } });
+      for (const q of res) Object.assign(ctx.pages.find((x) => x.id === q.id) || {}, q);
+      toast(res.some((q) => q.warning) ? "Split moved. These pages already had OCR text — re-read them." : "Split moved.", "ok");
+      renderRail(); loadWorking(); renderAll(true);
+    } catch (e) { toast(e.message, "error"); }
+  };
+  const conf = sp.auto ? (sp.confidence < 0.6 ? h("span.badge.gold", "check") : h("span.badge.green", "auto")) : h("span.badge.blue", "set by hand");
+  return h("section", h("span.label", "Two-page scan"),
+    h("div.hint", { style: { marginBottom: "6px" } }, `Scan ${sp.scan}, ${sp.side} half. Click the scan to move the cut into the gutter. `, conf),
+    box,
+    h("div.row", { style: { marginTop: "6px" } },
+      h("button.sm.icon", { title: "Move cut left", onclick: () => nudge(-0.002) }, "◀"), pct,
+      h("button.sm.icon", { title: "Move cut right", onclick: () => nudge(0.002) }, "▶"), apply));
 }
