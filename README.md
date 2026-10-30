@@ -298,6 +298,14 @@ PDF (scanned or born-digital), PNG, JPEG, TIFF (multi-page), BMP, WebP, GIF, JPE
 archives of page images, sorted by file name in natural order. If you upload several files you can combine them
 into one document.
 
+**Two-page scans.** Tick *Split two-page scans* at upload, or later in Process, which re-imports the book.
+Every landscape scan is then cut at the gutter into a left and a right page; portrait scans (covers, single
+pages) stay as they are. The gutter is found from text texture, so a dark binding shadow doesn't mislead it.
+The whole scan is kept: in Layout & crop, the *Two-page scan* panel shows it with the cut line. Click to move
+the line and *Apply* to re-cut both halves. Uncertain automatic cuts are marked **SPLIT?** on the thumbnail.
+With every scan split, odd pages are left halves and even pages are right halves, which suits *Carry odd &
+even pages separately*. A PDF's own text layer is not used for split scans.
+
 ## Project layout
 
 ```
