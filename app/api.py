@@ -108,6 +108,7 @@ def _page_summary(p: Page, eff: tuple[dict, str, int]) -> dict:
         "printed_page": p.printed_page, "error": p.error, "warning": p.warning,
         "facing": bool(p.right), "has_notes": bool(p.notes),
         "text_format": p.text_format or "prose", "profile": p.profile or "",
+        "spread": (p.image_meta or {}).get("spread"),
         "witness_status": ("human-reviewed" if p.reviewed and p.witness_status else p.witness_status or ""),
         "disagreements": _n_disagreements(p),
     }
@@ -133,7 +134,7 @@ def _clean_settings(raw: dict, base: dict | None = None) -> dict:
         s["engine"] = raw["engine"]
     if raw.get("footnote_mode") in ("drop", "separate"):
         s["footnote_mode"] = raw["footnote_mode"]
-    for k in ("preserve_refs", "use_text_layer"):
+    for k in ("preserve_refs", "use_text_layer", "split_spreads"):
         if k in raw:
             s[k] = bool(raw[k])
     if "hint" in raw:
@@ -207,6 +208,7 @@ def create_docs(
     use_text_layer: bool = Form(False),
     hint: str = Form(""),
     combine: bool = Form(True),
+    split_spreads: bool = Form(False),
     s: Session = Depends(get_session),
 ):
     files = [f for f in files if f.filename]
@@ -218,7 +220,7 @@ def create_docs(
     doc_settings = _clean_settings({
         "languages": [l.strip() for l in languages.split(",") if l.strip()],
         "engine": engine, "footnote_mode": footnote_mode, "preserve_refs": preserve_refs,
-        "use_text_layer": use_text_layer, "hint": hint,
+        "use_text_layer": use_text_layer, "hint": hint, "split_spreads": split_spreads,
     })
     groups = [files] if (combine or len(files) == 1) else [[f] for f in files]
     limit = settings.max_upload_mb * 1024 * 1024
@@ -668,3 +670,74 @@ def collation_report(doc_id: str, raw: int = 0, s: Session = Depends(get_session
     name = re.sub(r"[^\w\- ]+", "", doc.title).strip().replace(" ", "_") or "document"
     return Response(body, media_type="application/json; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}_collation.json"'})
+
+
+# ------------------------------------------------------------------ two-page scans
+
+@router.get("/pages/{page_id}/spread", dependencies=authed)
+def spread_image(page_id: int, s: Session = Depends(get_session)):
+    p = _get_page(s, page_id)
+    sp = (p.image_meta or {}).get("spread")
+    if not sp:
+        raise HTTPException(404, "This page is not part of a two-page scan")
+    doc_id = p.doc_id
+    s.close()  # don't hold a pooled connection while the image is built and sent
+    if not storage.spread_path(doc_id, sp["scan"]).exists():
+        raise HTTPException(404, "The original two-page scan is no longer stored (images purged)")
+    return _image_response(storage.spread_preview(doc_id, sp["scan"]))
+
+
+class ResplitIn(BaseModel):
+    fraction: float  # split position as a fraction of the scan's width
+
+
+@router.post("/pages/{page_id}/resplit", dependencies=authed)
+def resplit_page(page_id: int, body: ResplitIn, s: Session = Depends(get_session)):
+    """Move the cut between the two halves of a two-page scan. Both pages are re-cut from the stored scan."""
+    from .ingest import resplit
+    p = _get_page(s, page_id)
+    sp = (p.image_meta or {}).get("spread")
+    if not sp:
+        raise HTTPException(400, "This page is not part of a two-page scan")
+    if not storage.spread_path(p.doc_id, sp["scan"]).exists():
+        raise HTTPException(409, "The original two-page scan is no longer stored (images purged)")
+    if not 0.05 <= body.fraction <= 0.95:
+        raise HTTPException(400, "Split must be between 5% and 95% of the width")
+    doc = s.get(Document, p.doc_id)
+    pair = [q for q in doc.pages if (q.image_meta or {}).get("spread", {}).get("scan") == sp["scan"]]
+    if any(q.status in ("queued", "running") for q in pair):
+        raise HTTPException(409, "These pages are being read; wait for OCR to finish")
+    x = int(round(body.fraction * sp["spread_width"]))
+    resplit(p.doc_id, sp["scan"], x, pair)
+    for q in pair:
+        if q.body or q.right or q.notes:
+            note = "The split of this two-page scan was moved after OCR — re-read this page."
+            q.warning = (note + "\n" + (q.warning or "")).strip()[:4000]
+    s.flush()
+    eff = _effective(s, doc)
+    return [_page_summary(q, eff[q.index]) for q in pair]
+
+
+class ReimportIn(BaseModel):
+    split_spreads: bool
+    confirm_discard_text: bool = False
+
+
+@router.post("/docs/{doc_id}/reimport", dependencies=authed)
+def reimport(doc_id: str, body: ReimportIn, s: Session = Depends(get_session)):
+    """Import the stored original again (e.g. to split two-page scans). This replaces all pages."""
+    doc = _get_doc(s, doc_id)
+    if doc.status in ("ingesting", "processing"):
+        raise HTTPException(409, "Wait until importing/reading has finished (or pause it).")
+    if doc.images_purged or not all((storage.source_dir(doc_id) / sf["stored"]).exists() for sf in doc.source_files):
+        raise HTTPException(409, "The original file is no longer stored, so it can't be re-imported. Upload it again.")
+    with_text = sum(1 for p in doc.pages if p.body or p.right or p.notes)
+    if with_text and not body.confirm_discard_text:
+        raise HTTPException(409, f"{with_text} page(s) already have OCR text, which re-importing would discard.")
+    doc.settings = _clean_settings({"split_spreads": body.split_spreads}, doc.settings)
+    doc.status = "ingesting"
+    doc.ingest_done = 0
+    doc.error = ""
+    s.commit()
+    worker.submit_ingest(doc_id)
+    return {"ok": True}

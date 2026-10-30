@@ -55,6 +55,33 @@ def page_image_path(doc_id: str, index: int) -> Path:
     return d / f"{index + 1:04d}.{image_ext()}"
 
 
+def spreads_dir(doc_id: str) -> Path:
+    return doc_dir(doc_id) / "spreads"
+
+
+def spread_path(doc_id: str, scan: int) -> Path:
+    d = spreads_dir(doc_id)
+    for ext in ("png", "jpg"):
+        p = d / f"S{scan:04d}.{ext}"
+        if p.exists():
+            return p
+    return d / f"S{scan:04d}.png"
+
+
+def spread_preview(doc_id: str, scan: int) -> Path:
+    """Small JPEG of the whole two-page scan for the split control."""
+    src = spread_path(doc_id, scan)
+    prev = spreads_dir(doc_id) / f"S{scan:04d}.preview.jpg"
+    if prev.exists() and src.exists() and prev.stat().st_mtime >= src.stat().st_mtime:
+        return prev
+    from PIL import Image
+    with Image.open(src) as im:
+        im = im.convert("L")
+        im.thumbnail((1400, 1400))
+        im.save(prev, "JPEG", quality=85)
+    return prev
+
+
 def preview_path(doc_id: str, index: int) -> Path:
     return doc_dir(doc_id) / "previews" / f"{index + 1:04d}.jpg"
 
@@ -105,6 +132,7 @@ def purge_images(doc_id: str) -> None:
     shutil.rmtree(pages_dir(doc_id), ignore_errors=True)
     shutil.rmtree(source_dir(doc_id), ignore_errors=True)
     shutil.rmtree(doc_dir(doc_id) / "previews", ignore_errors=True)
+    shutil.rmtree(spreads_dir(doc_id), ignore_errors=True)
 
 
 def storage_report() -> dict:

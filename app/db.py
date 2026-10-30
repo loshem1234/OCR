@@ -32,6 +32,7 @@ DEFAULT_DOC_SETTINGS: dict[str, Any] = {
     "use_text_layer": False,     # use an existing PDF text layer when present
     "hint": "",                  # free-text note passed to Gemini (e.g. "Teubner edition of Proclus")
     "profile": "",               # "" = automatic | "scholarly_greek" | "standard"
+    "split_spreads": False,      # cut landscape two-page scans into a left and a right page at import
 }
 
 

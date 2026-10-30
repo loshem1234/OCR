@@ -209,6 +209,7 @@ def ingest_document(doc_id: str) -> None:
         sources = list(doc.source_files)
         from .ocr.scholarly import PROFILE, profile_for
         scholarly = profile_for(dict(doc.settings or {})) == PROFILE
+        split = bool((doc.settings or {}).get("split_spreads"))
         # Restart-safe: wipe any half-finished previous attempt.
         for p in list(doc.pages):
             s.delete(p)
@@ -216,6 +217,8 @@ def ingest_document(doc_id: str) -> None:
         doc.status = "ingesting"
     shutil.rmtree(storage.pages_dir(doc_id), ignore_errors=True)
     shutil.rmtree(storage.thumbs_dir(doc_id), ignore_errors=True)
+    shutil.rmtree(storage.spreads_dir(doc_id), ignore_errors=True)
+    shutil.rmtree(storage.doc_dir(doc_id) / "previews", ignore_errors=True)
 
     try:
         src_dir = storage.source_dir(doc_id)
@@ -226,21 +229,37 @@ def ingest_document(doc_id: str) -> None:
         with session_scope() as s:
             doc = s.get(Document, doc_id)
             doc.source_files = [dict(x) for x in sources]
-            doc.page_count = total
+            doc.page_count = total * 2 if split else total  # estimate for the progress bar
 
-        index = 0
+        index, scan_no = 0, 0
         for sf in sources:
             sf_start = index
             for im, has_text, meta in ITERATORS[sf["kind"]](src_dir / sf["stored"], scholarly):
-                fmt = _save_page(doc_id, index, im, lossless=scholarly)
-                meta = {**meta, "stored_format": fmt, "lossless": fmt == "png", "width": im.width, "height": im.height,
-                        "profile": "scholarly_greek" if scholarly else "standard"}
-                with session_scope() as s:
-                    s.add(Page(doc_id=doc_id, index=index, width=im.width, height=im.height,
-                               has_text_layer=has_text, image_meta=meta))
-                    doc = s.get(Document, doc_id)
-                    doc.ingest_done = index + 1
-                index += 1
+                parts = [(im, meta, has_text)]
+                if split:
+                    from .spreads import detect_gutter, split_at
+                    det = detect_gutter(im)
+                    if det["is_spread"]:
+                        scan_no += 1
+                        _save_spread(doc_id, scan_no, im, lossless=scholarly)
+                        left, right = split_at(im, det["x"])
+                        sp = {"scan": scan_no, "split_x": det["x"], "spread_width": im.width,
+                              "spread_height": im.height, "auto": True, "confidence": det["confidence"]}
+                        # a text layer can't be mapped onto half a page, so it is not used for split scans
+                        parts = [(left, {**meta, "spread": {**sp, "side": "left"}}, False),
+                                 (right, {**meta, "spread": {**sp, "side": "right"}}, False)]
+                for part, pmeta, ptext in parts:
+                    fmt = _save_page(doc_id, index, part, lossless=scholarly)
+                    pmeta = {**pmeta, "stored_format": fmt, "lossless": fmt == "png", "width": part.width,
+                             "height": part.height, "profile": "scholarly_greek" if scholarly else "standard"}
+                    with session_scope() as s:
+                        s.add(Page(doc_id=doc_id, index=index, width=part.width, height=part.height,
+                                   has_text_layer=ptext, image_meta=pmeta))
+                        doc = s.get(Document, doc_id)
+                        doc.ingest_done = index + 1
+                        if doc.page_count < index + 1:
+                            doc.page_count = index + 1
+                    index += 1
                 im.close()
             sf["first_index"] = sf_start
             sf["pages"] = index - sf_start
@@ -263,8 +282,41 @@ def ingest_document(doc_id: str) -> None:
                 doc.error = f"Could not read file: {e}"
 
 
+def _save_spread(doc_id: str, scan: int, im: Image.Image, lossless: bool) -> None:
+    """Keep the whole two-page scan so the split can be moved later."""
+    d = storage.spreads_dir(doc_id)
+    d.mkdir(parents=True, exist_ok=True)
+    if lossless:
+        im.save(d / f"S{scan:04d}.png", "PNG", optimize=True)
+    else:
+        im.save(d / f"S{scan:04d}.jpg", "JPEG", quality=settings.jpeg_quality, optimize=True)
+
+
+def resplit(doc_id: str, scan: int, x: int, pages: list) -> None:
+    """Cut a stored two-page scan again at x and rewrite both halves (images + thumbnails)."""
+    from .spreads import split_at
+    with Image.open(storage.spread_path(doc_id, scan)) as im:
+        im.load()
+        left, right = split_at(im.convert("L"), x)
+    for p in pages:
+        part = left if p.image_meta["spread"]["side"] == "left" else right
+        old = storage.page_image_path(doc_id, p.index)
+        lossless = old.suffix.lower() == ".png"
+        for ext in ("png", "jpg"):
+            (storage.pages_dir(doc_id) / f"{p.index + 1:04d}.{ext}").unlink(missing_ok=True)
+        storage.preview_path(doc_id, p.index).unlink(missing_ok=True)
+        _save_page(doc_id, p.index, part, lossless=lossless)
+        p.width, p.height = part.width, part.height
+        meta = dict(p.image_meta)
+        meta["spread"] = {**meta["spread"], "split_x": int(x), "auto": False}
+        meta["width"], meta["height"] = part.width, part.height
+        p.image_meta = meta
+
+
 def source_for_page(doc: Document, index: int) -> tuple[Path, int] | None:
     """Map a page index back to (pdf path, page number) for text-layer extraction."""
+    if (doc.settings or {}).get("split_spreads"):
+        return None  # page indices no longer correspond to PDF pages
     for sf in doc.source_files:
         start = sf.get("first_index", 0)
         if sf.get("kind") == "pdf" and start <= index < start + sf.get("pages", 0):
